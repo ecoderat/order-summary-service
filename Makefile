@@ -8,8 +8,8 @@ build:
 	done
 
 .PHONY: run
-run: build
+run:
 	@for bin in $(BINS); do \
-		echo "Running $$bin..."; \
-		./bin/$$bin & \
-	done
+		go run ./cmd/$$bin & \
+	done; \
+	wait

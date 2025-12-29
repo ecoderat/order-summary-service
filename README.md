@@ -4,8 +4,10 @@ Event-driven demo with Kafka, ClickHouse, and Redis.
 
 ## Getting started
 
+## Local infra
+
 ```bash
-make build
+docker compose -f deploy/docker-compose.yml up
 ```
 
 ```bash
