@@ -5,16 +5,21 @@ import (
 	"log"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 
 	"order-summary-service/internal/clickhouseclient"
 	"order-summary-service/internal/config"
 	"order-summary-service/internal/models"
 	"order-summary-service/internal/redisclient"
+)
+
+const (
+	idempotencyTTL    = 60 * 24 * time.Hour
+	redisTimeout      = 2 * time.Second
+	clickhouseTimeout = 15 * time.Second
 )
 
 func main() {
@@ -41,69 +46,70 @@ func main() {
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	brokers := splitCSV(cfg.KafkaBrokers)
-	topics := []string{cfg.KafkaCustomerTopic, cfg.KafkaOrderTopic}
-
-	var wg sync.WaitGroup
-	for _, topic := range topics {
-		if topic == "" {
-			continue
-		}
-		wg.Add(1)
-		go func(tp string) {
-			defer wg.Done()
-			consumeTopic(ctx, brokers, cfg.KafkaGroupID, tp, rdb, ch)
-		}(topic)
-	}
-
-	wg.Wait()
-	log.Printf("shutting down %s", cfg.ServiceName)
-}
-
-func consumeTopic(ctx context.Context, brokers []string, groupID, topic string, rdb *redisclient.Client, ch *clickhouseclient.Client) {
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: brokers,
-		GroupID: groupID,
-		Topic:   topic,
+	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
+		"bootstrap.servers":        cfg.KafkaBrokers,
+		"group.id":                 cfg.KafkaGroupID,
+		"auto.offset.reset":        "earliest",
+		"enable.auto.commit":       false,
+		"enable.auto.offset.store": false,
 	})
-	log.Printf("reader started topic=%s", topic)
+	if err != nil {
+		log.Fatalf("kafka consumer error: %v", err)
+	}
 	defer func() {
-		if err := reader.Close(); err != nil {
-			log.Printf("reader close error: %v", err)
+		if err := consumer.Close(); err != nil {
+			log.Printf("kafka consumer close error: %v", err)
 		}
 	}()
 
+	topics := filterTopics([]string{cfg.KafkaCustomerTopic, cfg.KafkaOrderTopic})
+	if len(topics) == 0 {
+		log.Fatalf("no topics configured")
+	}
+	if err := consumer.SubscribeTopics(topics, nil); err != nil {
+		log.Fatalf("kafka subscribe error: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	for {
-		msg, err := reader.FetchMessage(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
+		select {
+		case <-ctx.Done():
+			log.Printf("shutting down %s", cfg.ServiceName)
+			return
+		default:
+		}
+
+		event := consumer.Poll(250)
+		if event == nil {
+			continue
+		}
+
+		switch e := event.(type) {
+		case *kafka.Message:
+			log.Printf("message received topic=%s partition=%d offset=%d key=%s bytes=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset, string(e.Key), len(e.Value))
+			shouldCommit := handleMessage(ctx, rdb, ch, e.Value)
+			if !shouldCommit {
+				log.Printf("message not committed topic=%s partition=%d offset=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset)
+				continue
 			}
-			log.Printf("fetch error topic=%s err=%v", topic, err)
-			continue
-		}
-
-		log.Printf("message received topic=%s partition=%d offset=%d key=%s bytes=%d", topic, msg.Partition, msg.Offset, string(msg.Key), len(msg.Value))
-		shouldCommit := handleMessage(ctx, rdb, ch, msg.Value)
-		if !shouldCommit {
-			log.Printf("message not committed topic=%s partition=%d offset=%d", topic, msg.Partition, msg.Offset)
-			continue
-		}
-
-		if err := reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("commit error topic=%s err=%v", topic, err)
-		} else {
-			log.Printf("committed topic=%s partition=%d offset=%d", topic, msg.Partition, msg.Offset)
+			if _, err := consumer.CommitMessage(e); err != nil {
+				log.Printf("commit error topic=%s err=%v", *e.TopicPartition.Topic, err)
+			} else {
+				log.Printf("committed topic=%s partition=%d offset=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset)
+			}
+		case kafka.Error:
+			if e.Code() == kafka.ErrPartitionEOF {
+				log.Printf("partition EOF: %v", e)
+				continue
+			}
+			log.Printf("kafka error: %v", e)
+		default:
+			log.Printf("kafka event: %v", e)
 		}
 	}
 }
-
-const idempotencyTTL = 60 * 24 * time.Hour
-const redisTimeout = 2 * time.Second
-const clickhouseTimeout = 15 * time.Second
 
 func handleMessage(ctx context.Context, rdb *redisclient.Client, ch *clickhouseclient.Client, payload []byte) bool {
 	eventType, err := models.DetectEventType(payload)
@@ -196,11 +202,10 @@ func handleOrderEvent(ctx context.Context, rdb *redisclient.Client, ch *clickhou
 	return true
 }
 
-func splitCSV(input string) []string {
-	parts := strings.Split(input, ",")
+func filterTopics(topics []string) []string {
 	var out []string
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
+	for _, topic := range topics {
+		trimmed := strings.TrimSpace(topic)
 		if trimmed == "" {
 			continue
 		}

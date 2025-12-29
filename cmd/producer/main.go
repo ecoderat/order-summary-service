@@ -6,17 +6,24 @@ import (
 	"log"
 	"math/rand"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/google/uuid"
-	"github.com/segmentio/kafka-go"
 
 	"order-summary-service/internal/config"
 )
 
 const tickInterval = 3 * time.Second
+
+var customerIDs = []string{
+	"C12345678",
+	"C23456789",
+	"C34567890",
+	"C45678901",
+	"C56789012",
+}
 
 type customerEvent struct {
 	EventID    string `json:"event_id"`
@@ -38,19 +45,18 @@ type orderEvent struct {
 func main() {
 	cfg := config.Load("kafka-producer-service")
 	log.Printf("starting %s", cfg.ServiceName)
+	rand.Seed(time.Now().UnixNano())
+
+	producer, err := kafka.NewProducer(&kafka.ConfigMap{
+		"bootstrap.servers": cfg.KafkaBrokers,
+	})
+	if err != nil {
+		log.Fatalf("kafka producer error: %v", err)
+	}
+	defer producer.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	writer := &kafka.Writer{
-		Addr:         kafka.TCP(splitCSV(cfg.KafkaBrokers)...),
-		BatchTimeout: 200 * time.Millisecond,
-	}
-	defer func() {
-		if err := writer.Close(); err != nil {
-			log.Printf("writer close error: %v", err)
-		}
-	}()
 
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -62,18 +68,18 @@ func main() {
 			return
 		case <-ticker.C:
 			customerID := randomCustomerID()
-			if err := sendCustomerEvent(ctx, writer, cfg.KafkaCustomerTopic, customerID); err != nil {
+			if err := sendCustomerEvent(producer, cfg.KafkaCustomerTopic, customerID); err != nil {
 				log.Printf("customer send error: %v", err)
 				continue
 			}
-			if err := sendOrderEvent(ctx, writer, cfg.KafkaOrderTopic, customerID); err != nil {
+			if err := sendOrderEvent(producer, cfg.KafkaOrderTopic, customerID); err != nil {
 				log.Printf("order send error: %v", err)
 			}
 		}
 	}
 }
 
-func sendCustomerEvent(ctx context.Context, writer *kafka.Writer, topic, customerID string) error {
+func sendCustomerEvent(producer *kafka.Producer, topic, customerID string) error {
 	event := customerEvent{
 		EventID:    uuid.NewString(),
 		EventTime:  time.Now().UTC().Format(time.RFC3339Nano),
@@ -84,16 +90,17 @@ func sendCustomerEvent(ctx context.Context, writer *kafka.Writer, topic, custome
 	if err != nil {
 		return err
 	}
-	msg := kafka.Message{
-		Topic: topic,
-		Key:   []byte(customerID),
-		Value: payload,
-		Time:  time.Now().UTC(),
+
+	msg := &kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+		Key:            []byte(customerID),
+		Value:          payload,
 	}
-	return writer.WriteMessages(ctx, msg)
+
+	return producer.Produce(msg, nil)
 }
 
-func sendOrderEvent(ctx context.Context, writer *kafka.Writer, topic, customerID string) error {
+func sendOrderEvent(producer *kafka.Producer, topic, customerID string) error {
 	event := orderEvent{
 		EventID:     uuid.NewString(),
 		EventTime:   time.Now().UTC().Format(time.RFC3339Nano),
@@ -107,32 +114,20 @@ func sendOrderEvent(ctx context.Context, writer *kafka.Writer, topic, customerID
 	if err != nil {
 		return err
 	}
-	msg := kafka.Message{
-		Topic: topic,
-		Key:   []byte(customerID),
-		Value: payload,
-		Time:  time.Now().UTC(),
+
+	msg := &kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+		Key:            []byte(customerID),
+		Value:          payload,
 	}
-	return writer.WriteMessages(ctx, msg)
+
+	return producer.Produce(msg, nil)
 }
 
 func randomCustomerID() string {
-	return "C" + uuid.NewString()[:8]
+	return customerIDs[rand.Intn(len(customerIDs))]
 }
 
 func randomAmount() float64 {
 	return 10 + rand.Float64()*5000
-}
-
-func splitCSV(input string) []string {
-	parts := strings.Split(input, ",")
-	var out []string
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed == "" {
-			continue
-		}
-		out = append(out, trimmed)
-	}
-	return out
 }
