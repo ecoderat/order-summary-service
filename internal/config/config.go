@@ -14,6 +14,10 @@ type Config struct {
 	RedisAddr          string
 	RedisDB            int
 	ClickHouseAddr     string
+	ClickHouseDB       string
+	ClickHouseUser     string
+	ClickHousePassword string
+	ClickHouseProtocol string
 	HTTPAddr           string
 }
 
@@ -26,7 +30,11 @@ func Load(serviceName string) Config {
 		KafkaOrderTopic:    envOrDefault("KAFKA_ORDER_TOPIC", "order_events"),
 		RedisAddr:          envOrDefault("REDIS_ADDR", "localhost:6379"),
 		RedisDB:            envIntOrDefault("REDIS_DB", 0),
-		ClickHouseAddr:     envOrDefault("CLICKHOUSE_ADDR", "localhost:9000"),
+		ClickHouseAddr:     envOrDefault("CLICKHOUSE_ADDR", "127.0.0.1:9000"),
+		ClickHouseDB:       envOrDefault("CLICKHOUSE_DB", "default"),
+		ClickHouseUser:     envOrDefault("CLICKHOUSE_USER", "default"),
+		ClickHousePassword: envOrDefault("CLICKHOUSE_PASSWORD", "password"),
+		ClickHouseProtocol: envOrDefault("CLICKHOUSE_PROTOCOL", "native"),
 		HTTPAddr:           envOrDefault("HTTP_ADDR", ":8080"),
 	}
 }

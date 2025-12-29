@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 type Client struct {
@@ -22,12 +24,21 @@ type MonthlySummary struct {
 	Currency   string
 }
 
-func New(addr string) (*Client, error) {
+func New(addr, database, username, password, protocol string) (*Client, error) {
+	chProtocol := clickhouse.Native
+	if protocol == "http" {
+		chProtocol = clickhouse.HTTP
+	}
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{addr},
 		Auth: clickhouse.Auth{
-			Database: "default",
+			Database: database,
+			Username: username,
+			Password: password,
 		},
+		Protocol:    chProtocol,
+		DialTimeout: 5 * time.Second,
+		ReadTimeout: 30 * time.Second,
 	})
 	if err != nil {
 		return nil, err
@@ -44,12 +55,35 @@ func (c *Client) Close() error {
 
 func (c *Client) InsertCustomer(ctx context.Context, customerID string, createdAt, updatedAt time.Time, sourceEventID string) error {
 	query := `INSERT INTO customers_current (customer_id, created_at, updated_at, source_event_id)`
-	return c.conn.Exec(ctx, query, customerID, createdAt, updatedAt, sourceEventID)
+	eventUUID, err := uuid.Parse(sourceEventID)
+	if err != nil {
+		return err
+	}
+	batch, err := c.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return err
+	}
+	if err := batch.Append(customerID, createdAt, updatedAt, eventUUID); err != nil {
+		return err
+	}
+	return batch.Send()
 }
 
 func (c *Client) InsertOrder(ctx context.Context, orderID, customerID string, orderTime time.Time, totalAmount float64, currency, sourceEventID string) error {
 	query := `INSERT INTO orders_current (order_id, customer_id, order_time, total_amount, currency, source_event_id)`
-	return c.conn.Exec(ctx, query, orderID, customerID, orderTime, totalAmount, currency, sourceEventID)
+	eventUUID, err := uuid.Parse(sourceEventID)
+	if err != nil {
+		return err
+	}
+	amount := decimal.NewFromFloat(totalAmount).Round(2)
+	batch, err := c.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return err
+	}
+	if err := batch.Append(orderID, customerID, orderTime, amount, currency, eventUUID); err != nil {
+		return err
+	}
+	return batch.Send()
 }
 
 func (c *Client) CustomerExistsFinal(ctx context.Context, customerID string) (bool, error) {

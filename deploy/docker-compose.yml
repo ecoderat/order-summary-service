@@ -24,6 +24,17 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        cub kafka-ready -b kafka:29092 1 20
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic customer_events --partitions 1 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic order_events --partitions 1 --replication-factor 1
+
   redis:
     image: redis:7-alpine
     ports:
@@ -34,5 +45,10 @@ services:
     ports:
       - "8123:8123"
       - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: "password"
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     volumes:
       - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
