@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 type Config struct {
@@ -13,12 +14,19 @@ type Config struct {
 	KafkaOrderTopic    string
 	RedisAddr          string
 	RedisDB            int
+	RedisTimeout       time.Duration
 	ClickHouseAddr     string
 	ClickHouseDB       string
 	ClickHouseUser     string
 	ClickHousePassword string
 	ClickHouseProtocol string
+	ClickHouseTimeout  time.Duration
+	UseTLS             bool
+	DBMaxConnLifetime  time.Duration
+	DBMaxConns         int
+	DBMinConns         int
 	HTTPAddr           string
+	IdempotencyTTL     time.Duration
 }
 
 func Load(serviceName string) Config {
@@ -30,12 +38,19 @@ func Load(serviceName string) Config {
 		KafkaOrderTopic:    envOrDefault("KAFKA_ORDER_TOPIC", "order_events"),
 		RedisAddr:          envOrDefault("REDIS_ADDR", "localhost:6379"),
 		RedisDB:            envIntOrDefault("REDIS_DB", 0),
-		ClickHouseAddr:     envOrDefault("CLICKHOUSE_ADDR", "127.0.0.1:9000"),
+		RedisTimeout:       time.Duration(envIntOrDefault("REDIS_TIMEOUT_SECONDS", 2)) * time.Second,
+		ClickHouseAddr:     envOrDefault("CLICKHOUSE_ADDR", "localhost:9000"),
 		ClickHouseDB:       envOrDefault("CLICKHOUSE_DB", "default"),
 		ClickHouseUser:     envOrDefault("CLICKHOUSE_USER", "default"),
 		ClickHousePassword: envOrDefault("CLICKHOUSE_PASSWORD", "password"),
-		ClickHouseProtocol: envOrDefault("CLICKHOUSE_PROTOCOL", "native"),
+		ClickHouseProtocol: envOrDefault("CLICKHOUSE_PROTOCOL", "tcp"),
+		ClickHouseTimeout:  time.Duration(envIntOrDefault("CLICKHOUSE_TIMEOUT_SECONDS", 15)) * time.Second,
+		UseTLS:             envOrDefault("CLICKHOUSE_USE_TLS", "false") == "true",
+		DBMaxConnLifetime:  time.Duration(envIntOrDefault("DB_MAX_CONN_LIFETIME_MINUTES", 60)) * time.Minute,
+		DBMaxConns:         envIntOrDefault("DB_MAX_CONNS", 10),
+		DBMinConns:         envIntOrDefault("DB_MIN_CONNS", 5),
 		HTTPAddr:           envOrDefault("HTTP_ADDR", ":8080"),
+		IdempotencyTTL:     time.Duration(envIntOrDefault("IDEMPOTENCY_TTL_HOURS", 60*24)) * time.Hour,
 	}
 }
 

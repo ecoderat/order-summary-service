@@ -10,16 +10,11 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 
-	"order-summary-service/internal/clickhouseclient"
 	"order-summary-service/internal/config"
+	"order-summary-service/internal/db"
 	"order-summary-service/internal/models"
 	"order-summary-service/internal/redisclient"
-)
-
-const (
-	idempotencyTTL    = 60 * 24 * time.Hour
-	redisTimeout      = 2 * time.Second
-	clickhouseTimeout = 15 * time.Second
+	"order-summary-service/internal/repository"
 )
 
 func main() {
@@ -29,7 +24,10 @@ func main() {
 	log.Printf("redis addr=%s db=%d", cfg.RedisAddr, cfg.RedisDB)
 	log.Printf("clickhouse addr=%s db=%s user=%s protocol=%s", cfg.ClickHouseAddr, cfg.ClickHouseDB, cfg.ClickHouseUser, cfg.ClickHouseProtocol)
 
-	ch, err := clickhouseclient.New(cfg.ClickHouseAddr, cfg.ClickHouseDB, cfg.ClickHouseUser, cfg.ClickHousePassword, cfg.ClickHouseProtocol)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	ch, err := db.New(ctx, &cfg)
 	if err != nil {
 		log.Fatalf("clickhouse connect error: %v", err)
 	}
@@ -38,6 +36,8 @@ func main() {
 			log.Printf("clickhouse close error: %v", err)
 		}
 	}()
+
+	repo := repository.NewRepository(ch)
 
 	rdb := redisclient.New(cfg.RedisAddr, cfg.RedisDB)
 	defer func() {
@@ -70,9 +70,6 @@ func main() {
 		log.Fatalf("kafka subscribe error: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -89,7 +86,7 @@ func main() {
 		switch e := event.(type) {
 		case *kafka.Message:
 			log.Printf("message received topic=%s partition=%d offset=%d key=%s bytes=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset, string(e.Key), len(e.Value))
-			shouldCommit := handleMessage(ctx, rdb, ch, e.Value)
+			shouldCommit := handleMessage(ctx, cfg, rdb, repo, e.Value)
 			if !shouldCommit {
 				log.Printf("message not committed topic=%s partition=%d offset=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset)
 				continue
@@ -111,7 +108,7 @@ func main() {
 	}
 }
 
-func handleMessage(ctx context.Context, rdb *redisclient.Client, ch *clickhouseclient.Client, payload []byte) bool {
+func handleMessage(ctx context.Context, cfg config.Config, rdb *redisclient.Client, repo repository.Repository, payload []byte) bool {
 	eventType, err := models.DetectEventType(payload)
 	if err != nil {
 		log.Printf("detect event type error: %v", err)
@@ -126,24 +123,24 @@ func handleMessage(ctx context.Context, rdb *redisclient.Client, ch *clickhousec
 			log.Printf("parse customer event error: %v", err)
 			return false
 		}
-		return handleCustomerEvent(ctx, rdb, ch, evt)
+		return handleCustomerEvent(ctx, cfg, rdb, repo, evt)
 	case models.EventTypeOrderCreated:
 		evt, err := models.ParseOrderEvent(payload)
 		if err != nil {
 			log.Printf("parse order event error: %v", err)
 			return false
 		}
-		return handleOrderEvent(ctx, rdb, ch, evt)
+		return handleOrderEvent(ctx, cfg, rdb, repo, evt)
 	default:
 		log.Printf("unknown event_type=%s", eventType)
 		return false
 	}
 }
 
-func handleCustomerEvent(ctx context.Context, rdb *redisclient.Client, ch *clickhouseclient.Client, evt models.CustomerEvent) bool {
+func handleCustomerEvent(ctx context.Context, cfg config.Config, rdb *redisclient.Client, repo repository.Repository, evt models.CustomerEvent) bool {
 	log.Printf("customer processing event_id=%s customer_id=%s", evt.EventID, evt.CustomerID)
-	redisCtx, redisCancel := context.WithTimeout(ctx, redisTimeout)
-	marked, err := rdb.CheckAndMarkEvent(redisCtx, evt.EventID, idempotencyTTL)
+	redisCtx, redisCancel := context.WithTimeout(ctx, cfg.RedisTimeout)
+	marked, err := rdb.CheckAndMarkEvent(redisCtx, evt.EventID, cfg.IdempotencyTTL)
 	redisCancel()
 	if err != nil {
 		log.Printf("idempotency check error event_id=%s err=%v", evt.EventID, err)
@@ -154,12 +151,17 @@ func handleCustomerEvent(ctx context.Context, rdb *redisclient.Client, ch *click
 		return true
 	}
 
-	chCtx, chCancel := context.WithTimeout(ctx, clickhouseTimeout)
-	err = ch.InsertCustomer(chCtx, evt.CustomerID, evt.EventTime, evt.EventTime, evt.EventID)
+	chCtx, chCancel := context.WithTimeout(ctx, cfg.ClickHouseTimeout)
+	err = repo.CreateCustomer(chCtx, repository.CreateCustomerParams{
+		CustomerID:    evt.CustomerID,
+		CreatedAt:     evt.EventTime,
+		UpdatedAt:     evt.EventTime,
+		SourceEventID: evt.EventID,
+	})
 	chCancel()
 	if err != nil {
 		log.Printf("clickhouse insert customer error event_id=%s err=%v", evt.EventID, err)
-		unmarkCtx, unmarkCancel := context.WithTimeout(context.Background(), redisTimeout)
+		unmarkCtx, unmarkCancel := context.WithTimeout(context.Background(), cfg.RedisTimeout)
 		if err := rdb.UnmarkEvent(unmarkCtx, evt.EventID); err != nil {
 			log.Printf("idempotency unmark error event_id=%s err=%v", evt.EventID, err)
 		}
@@ -171,10 +173,10 @@ func handleCustomerEvent(ctx context.Context, rdb *redisclient.Client, ch *click
 	return true
 }
 
-func handleOrderEvent(ctx context.Context, rdb *redisclient.Client, ch *clickhouseclient.Client, evt models.OrderEvent) bool {
+func handleOrderEvent(ctx context.Context, cfg config.Config, rdb *redisclient.Client, repo repository.Repository, evt models.OrderEvent) bool {
 	log.Printf("order processing event_id=%s customer_id=%s order_id=%s", evt.EventID, evt.CustomerID, evt.OrderID)
-	redisCtx, redisCancel := context.WithTimeout(ctx, redisTimeout)
-	marked, err := rdb.CheckAndMarkEvent(redisCtx, evt.EventID, idempotencyTTL)
+	redisCtx, redisCancel := context.WithTimeout(ctx, cfg.RedisTimeout)
+	marked, err := rdb.CheckAndMarkEvent(redisCtx, evt.EventID, cfg.IdempotencyTTL)
 	redisCancel()
 	if err != nil {
 		log.Printf("idempotency check error event_id=%s err=%v", evt.EventID, err)
@@ -185,12 +187,19 @@ func handleOrderEvent(ctx context.Context, rdb *redisclient.Client, ch *clickhou
 		return true
 	}
 
-	chCtx, chCancel := context.WithTimeout(ctx, clickhouseTimeout)
-	err = ch.InsertOrder(chCtx, evt.OrderID, evt.CustomerID, evt.EventTime, evt.TotalAmount, evt.Currency, evt.EventID)
+	chCtx, chCancel := context.WithTimeout(ctx, cfg.ClickHouseTimeout)
+	err = repo.CreateOrder(chCtx, repository.CreateOrderParams{
+		OrderID:       evt.OrderID,
+		CustomerID:    evt.CustomerID,
+		OrderTime:     evt.EventTime,
+		TotalAmount:   evt.TotalAmount,
+		Currency:      evt.Currency,
+		SourceEventID: evt.EventID,
+	})
 	chCancel()
 	if err != nil {
 		log.Printf("clickhouse insert order error event_id=%s err=%v", evt.EventID, err)
-		unmarkCtx, unmarkCancel := context.WithTimeout(context.Background(), redisTimeout)
+		unmarkCtx, unmarkCancel := context.WithTimeout(context.Background(), cfg.RedisTimeout)
 		if err := rdb.UnmarkEvent(unmarkCtx, evt.EventID); err != nil {
 			log.Printf("idempotency unmark error event_id=%s err=%v", evt.EventID, err)
 		}
