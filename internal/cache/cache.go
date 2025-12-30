@@ -21,12 +21,12 @@ type Cache interface {
 	Close() error
 }
 
-type Client struct {
+type cache struct {
 	rdb *redis.Client
 }
 
-func New(addr string, db int) *Client {
-	return &Client{
+func New(addr string, db int) *cache {
+	return &cache{
 		rdb: redis.NewClient(&redis.Options{
 			Addr: addr,
 			DB:   db,
@@ -34,11 +34,11 @@ func New(addr string, db int) *Client {
 	}
 }
 
-func (c *Client) Close() error {
+func (c *cache) Close() error {
 	return c.rdb.Close()
 }
 
-func (c *Client) CheckAndMarkEvent(ctx context.Context, eventID string, ttl time.Duration) (bool, error) {
+func (c *cache) CheckAndMarkEvent(ctx context.Context, eventID string, ttl time.Duration) (bool, error) {
 	key := idemKeyPrefix + eventID
 	set, err := c.rdb.SetNX(ctx, key, "1", ttl).Result()
 	if err != nil {
@@ -47,12 +47,12 @@ func (c *Client) CheckAndMarkEvent(ctx context.Context, eventID string, ttl time
 	return set, nil
 }
 
-func (c *Client) UnmarkEvent(ctx context.Context, eventID string) error {
+func (c *cache) UnmarkEvent(ctx context.Context, eventID string) error {
 	key := idemKeyPrefix + eventID
 	return c.rdb.Del(ctx, key).Err()
 }
 
-func (c *Client) InvalidateMonthly(ctx context.Context, customerID, dateUTC string) error {
+func (c *cache) InvalidateMonthly(ctx context.Context, customerID, dateUTC string) error {
 	key := CacheKeyMonthly(customerID, dateUTC)
 	return c.rdb.Del(ctx, key).Err()
 }
@@ -61,7 +61,7 @@ func CacheKeyMonthly(customerID, dateUTC string) string {
 	return cacheKeyPrefix + customerID + ":" + dateUTC
 }
 
-func (c *Client) CacheGet(ctx context.Context, customerID, dateUTC string) (string, bool, error) {
+func (c *cache) CacheGet(ctx context.Context, customerID, dateUTC string) (string, bool, error) {
 	key := CacheKeyMonthly(customerID, dateUTC)
 	val, err := c.rdb.Get(ctx, key).Result()
 	if err == redis.Nil {
@@ -73,7 +73,7 @@ func (c *Client) CacheGet(ctx context.Context, customerID, dateUTC string) (stri
 	return val, true, nil
 }
 
-func (c *Client) CacheSet(ctx context.Context, customerID, dateUTC, payload string, ttl time.Duration) error {
+func (c *cache) CacheSet(ctx context.Context, customerID, dateUTC, payload string, ttl time.Duration) error {
 	key := CacheKeyMonthly(customerID, dateUTC)
 	return c.rdb.Set(ctx, key, payload, ttl).Err()
 }
