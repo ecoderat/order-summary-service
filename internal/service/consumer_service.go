@@ -8,8 +8,8 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 
+	"order-summary-service/internal/cache"
 	"order-summary-service/internal/models"
-	"order-summary-service/internal/redisclient"
 	"order-summary-service/internal/repository"
 )
 
@@ -21,7 +21,7 @@ type ConsumerService interface {
 type consumerService struct {
 	consumer *kafka.Consumer
 	repo     repository.Repository
-	rdb      *redisclient.Client
+	rdb      cache.Cache
 	ch       Closer
 
 	batchSize         int
@@ -74,7 +74,7 @@ type batchResult struct {
 func NewConsumerService(
 	consumer *kafka.Consumer,
 	repo repository.Repository,
-	rdb *redisclient.Client,
+	rdb cache.Cache,
 	ch Closer,
 	cfg ConsumerConfig,
 ) (ConsumerService, error) {

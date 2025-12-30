@@ -8,9 +8,9 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 
+	"order-summary-service/internal/cache"
 	"order-summary-service/internal/config"
 	"order-summary-service/internal/db"
-	"order-summary-service/internal/redisclient"
 	"order-summary-service/internal/repository"
 	"order-summary-service/internal/service"
 )
@@ -34,7 +34,7 @@ func main() {
 
 	repo := repository.NewRepository(ch)
 
-	rdb := redisclient.New(cfg.RedisAddr, cfg.RedisDB)
+	rdb := cache.New(cfg.RedisAddr, cfg.RedisDB)
 	defer func() {
 		if err := rdb.Close(); err != nil {
 			log.Printf("redis close error: %v", err)

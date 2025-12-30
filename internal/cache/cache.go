@@ -1,4 +1,4 @@
-package redisclient
+package cache
 
 import (
 	"context"
@@ -11,6 +11,15 @@ const (
 	idemKeyPrefix  = "idem:event:"
 	cacheKeyPrefix = "cache:monthly:"
 )
+
+type Cache interface {
+	CheckAndMarkEvent(ctx context.Context, eventID string, ttl time.Duration) (bool, error)
+	UnmarkEvent(ctx context.Context, eventID string) error
+	InvalidateMonthly(ctx context.Context, customerID, dateUTC string) error
+	CacheGet(ctx context.Context, customerID, dateUTC string) (string, bool, error)
+	CacheSet(ctx context.Context, customerID, dateUTC, payload string, ttl time.Duration) error
+	Close() error
+}
 
 type Client struct {
 	rdb *redis.Client
