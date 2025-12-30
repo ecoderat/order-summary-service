@@ -16,7 +16,7 @@ type MonthlySummary struct {
 	WindowFrom time.Time
 	WindowTo   time.Time
 	OrderCount uint64
-	TotalSpend float64
+	TotalSpend decimal.Decimal
 	Currency   string
 }
 
