@@ -38,13 +38,11 @@ type CreateOrderParams struct {
 
 // Repository defines the methods for interacting with the data store.
 type Repository interface {
-	// CreateCustomer inserts a new customer record.
 	CreateCustomer(ctx context.Context, params CreateCustomerParams) error
-	// CreateOrder inserts a new order record.
+	CreateCustomerBatch(ctx context.Context, customers []CreateCustomerParams) error
 	CreateOrder(ctx context.Context, params CreateOrderParams) error
-	// MonthlySummaryFinal retrieves the monthly summary for a customer using FINAL modifier.
+	CreateOrderBatch(ctx context.Context, orders []CreateOrderParams) error
 	MonthlySummaryFinal(ctx context.Context, customerID string) (MonthlySummary, bool, error)
-	// CustomerExistsFinal checks if a customer exists using FINAL modifier.
 	CustomerExistsFinal(ctx context.Context, customerID string) (bool, error)
 }
 
@@ -57,6 +55,7 @@ func NewRepository(conn clickhouse.Conn) Repository {
 	return &repository{conn: conn}
 }
 
+// CreateCustomer inserts a new customer record.
 func (r *repository) CreateCustomer(ctx context.Context, params CreateCustomerParams) error {
 	query := `INSERT INTO customers_current (customer_id, created_at, updated_at, source_event_id)`
 	eventUUID, err := uuid.Parse(params.SourceEventID)
@@ -73,6 +72,39 @@ func (r *repository) CreateCustomer(ctx context.Context, params CreateCustomerPa
 	return batch.Send()
 }
 
+// CreateCustomerBatch inserts multiple customer records in a batch.
+func (r *repository) CreateCustomerBatch(ctx context.Context, customers []CreateCustomerParams) error {
+	query := `
+		INSERT INTO customers_current (customer_id, created_at, updated_at, source_event_id)
+		VALUES (?, ?, ?, ?)
+	`
+
+	batch, err := r.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return err
+	}
+
+	for _, customer := range customers {
+		eventUUID, err := uuid.Parse(customer.SourceEventID)
+		if err != nil {
+			return err
+		}
+
+		err = batch.Append(
+			customer.CustomerID,
+			customer.CreatedAt,
+			customer.UpdatedAt,
+			eventUUID,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return batch.Send()
+}
+
+// CreateOrder inserts a new order record.
 func (r *repository) CreateOrder(ctx context.Context, params CreateOrderParams) error {
 	query := `INSERT INTO orders_current (order_id, customer_id, order_time, total_amount, currency, source_event_id)`
 	eventUUID, err := uuid.Parse(params.SourceEventID)
@@ -90,12 +122,49 @@ func (r *repository) CreateOrder(ctx context.Context, params CreateOrderParams) 
 	return batch.Send()
 }
 
+// CreateOrderBatch inserts multiple order records in a batch.
+func (r *repository) CreateOrderBatch(ctx context.Context, orders []CreateOrderParams) error {
+	query := `
+		INSERT INTO orders_current (order_id, customer_id, order_time, total_amount, currency, source_event_id)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`
+
+	batch, err := r.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return err
+	}
+
+	for _, order := range orders {
+		eventUUID, err := uuid.Parse(order.SourceEventID)
+		if err != nil {
+			return err
+		}
+
+		amount := decimal.NewFromFloat(order.TotalAmount).Round(2)
+
+		err = batch.Append(
+			order.OrderID,
+			order.CustomerID,
+			order.OrderTime,
+			amount,
+			order.Currency,
+			eventUUID,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return batch.Send()
+}
+
+// CustomerExistsFinal checks if a customer exists using FINAL modifier.
 func (r *repository) CustomerExistsFinal(ctx context.Context, customerID string) (bool, error) {
 	query := `
-SELECT 1
-FROM customers_current FINAL
-WHERE customer_id = ?
-LIMIT 1`
+	SELECT 1
+	FROM customers_current FINAL
+	WHERE customer_id = ?
+	LIMIT 1`
 
 	row := r.conn.QueryRow(ctx, query, customerID)
 	var one uint8
@@ -108,6 +177,7 @@ LIMIT 1`
 	return true, nil
 }
 
+// MonthlySummaryFinal retrieves the monthly summary for a customer using FINAL modifier.
 func (r *repository) MonthlySummaryFinal(ctx context.Context, customerID string) (MonthlySummary, bool, error) {
 	query := `
 WITH
