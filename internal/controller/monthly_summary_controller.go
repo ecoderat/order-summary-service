@@ -68,7 +68,7 @@ func (c *monthlySummaryController) HandleFiber(ctx fiber.Ctx) error {
 		OrderCount: summary.OrderCount,
 		TotalSpend: summary.TotalSpend,
 		Currency:   summary.Currency,
-		Source:     "db",
+		Source:     summary.Source,
 	}
 
 	logger.WithFields(logrus.Fields{

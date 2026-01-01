@@ -27,6 +27,7 @@ type Config struct {
 	DBMinConns            int
 	ConsumerBatchSize     int
 	ConsumerBatchInterval time.Duration
+	CacheTTL              time.Duration
 	HTTPAddr              string
 	IdempotencyTTL        time.Duration
 }
@@ -53,6 +54,7 @@ func Load(serviceName string) Config {
 		DBMinConns:            envIntOrDefault("DB_MIN_CONNS", 5),
 		ConsumerBatchSize:     envIntOrDefault("CONSUMER_BATCH_SIZE", 1000),
 		ConsumerBatchInterval: time.Duration(envIntOrDefault("CONSUMER_BATCH_INTERVAL_MS", 2000)) * time.Millisecond,
+		CacheTTL:              time.Duration(envIntOrDefault("CACHE_TTL_HOURS", 28)) * time.Hour,
 		HTTPAddr:              envOrDefault("HTTP_ADDR", ":8080"),
 		IdempotencyTTL:        time.Duration(envIntOrDefault("IDEMPOTENCY_TTL_HOURS", 60*24)) * time.Hour,
 	}

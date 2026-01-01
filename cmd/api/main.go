@@ -8,6 +8,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/sirupsen/logrus"
 
+	"order-summary-service/internal/cache"
 	"order-summary-service/internal/config"
 	"order-summary-service/internal/controller"
 	"order-summary-service/internal/db"
@@ -33,7 +34,14 @@ func main() {
 	}()
 
 	repo := repository.NewRepository(ch)
-	summaryService := service.NewMonthlySummaryService(repo)
+	cacheClient := cache.New(cfg.RedisAddr, cfg.RedisDB)
+	defer func() {
+		if err := cacheClient.Close(); err != nil {
+			logrus.WithError(err).Error("cache close error")
+		}
+	}()
+
+	summaryService := service.NewMonthlySummaryService(repo, cacheClient, cfg.CacheTTL)
 	summaryController := controller.NewMonthlySummaryController(summaryService, logrus.StandardLogger())
 
 	app := fiber.New()
