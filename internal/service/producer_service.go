@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -12,7 +14,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const currencyDefault = "TRY"
+const (
+	currencyDefault        = "TRY"
+	customerCreatedEvent   = "CUSTOMER_CREATED"
+	orderCreatedEvent      = "ORDER_CREATED"
+	tickFlushTimeoutMs     = 1000
+	shutdownFlushTimeoutMs = 5000
+)
 
 type ProducerService interface {
 	Run(ctx context.Context) error
@@ -31,7 +39,7 @@ type ProducerConfig struct {
 }
 
 type producerService struct {
-	producer *kafka.Producer
+	producer kafkaProducer
 	cfg      ProducerConfig
 	logger   *logrus.Logger
 
@@ -42,6 +50,8 @@ type producerService struct {
 	custStore  *customerEventStore
 	orderStore *orderEventStore
 	rng        *rand.Rand
+
+	closeOnce sync.Once
 }
 
 type customerEvent struct {
@@ -74,28 +84,18 @@ type orderEventStore struct {
 	byCustomer map[string]orderEvent
 }
 
+type kafkaProducer interface {
+	Produce(msg *kafka.Message, deliveryChan chan kafka.Event) error
+	Flush(timeoutMs int) int
+	Close()
+	Events() chan kafka.Event
+}
+
 func NewProducerService(producer *kafka.Producer, customerTopic, orderTopic string, logger *logrus.Logger, cfg ProducerConfig) (ProducerService, error) {
 	if logger == nil {
 		logger = logrus.StandardLogger()
 	}
-	if cfg.Interval <= 0 {
-		cfg.Interval = 3 * time.Second
-	}
-	if cfg.Size <= 0 {
-		cfg.Size = 1
-	}
-	if cfg.CustomerRatio < 0 {
-		cfg.CustomerRatio = 0
-	}
-	if cfg.CustomerRatio > 1 {
-		cfg.CustomerRatio = 1
-	}
-	cfg.DupPercent = clampPercent(cfg.DupPercent)
-	cfg.CustomerUpgradePercent = clampPercent(cfg.CustomerUpgradePercent)
-	cfg.OrderUpgradePercent = clampPercent(cfg.OrderUpgradePercent)
-	if cfg.CustomerPoolSize <= 0 {
-		cfg.CustomerPoolSize = 1
-	}
+	cfg = cfg.normalized()
 
 	return &producerService{
 		producer:      producer,
@@ -111,56 +111,46 @@ func NewProducerService(producer *kafka.Producer, customerTopic, orderTopic stri
 }
 
 func (s *producerService) Run(ctx context.Context) error {
-	s.logger.WithFields(logrus.Fields{
-		"interval":         s.cfg.Interval.String(),
-		"size":             s.cfg.Size,
-		"ratio":            s.cfg.CustomerRatio,
-		"dup_percent":      s.cfg.DupPercent,
-		"customer_upgrade": s.cfg.CustomerUpgradePercent,
-		"order_upgrade":    s.cfg.OrderUpgradePercent,
-		"customer_pool":    s.cfg.CustomerPoolSize,
-	}).Info("producer config")
-	if s.cfg.FixedCustomerID != "" {
-		s.logger.WithField("customer_id", s.cfg.FixedCustomerID).Info("fixed customer id")
-	}
+	s.logConfig()
 
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
 
+	deliveryStats := &deliveryStats{}
+	go s.drainDeliveryReports(ctx, deliveryStats)
+
+	var lastDeliveryOK uint64
+	var lastDeliveryErr uint64
+
 	for {
 		select {
 		case <-ctx.Done():
+			s.flushBestEffort(shutdownFlushTimeoutMs)
 			return ctx.Err()
 		case <-ticker.C:
-			customerCount, orderCount := splitCounts(s.cfg.Size, s.cfg.CustomerRatio)
+			customerCount, orderCount := s.tickOnce()
+			s.flushBestEffort(tickFlushTimeoutMs)
+
+			deliveredOK, deliveredErr := deliveryStats.snapshot()
 			s.logger.WithFields(logrus.Fields{
-				"customer": customerCount,
-				"order":    orderCount,
-			}).Info("tick send")
-			for i := 0; i < customerCount; i++ {
-				customerID := s.pickCustomerID(rollPercent(s.rng, s.cfg.CustomerUpgradePercent))
-				customerEvt := s.buildCustomerEvent(customerID)
-				if err := s.sendEvent(s.customerTopic, customerEvt.CustomerID, customerEvt); err != nil {
-					s.logger.WithError(err).Error("customer send error")
-				}
-			}
-			for i := 0; i < orderCount; i++ {
-				customerID := s.pickCustomerID(true)
-				orderEvt := s.buildOrderEvent(customerID)
-				if err := s.sendEvent(s.orderTopic, orderEvt.CustomerID, orderEvt); err != nil {
-					s.logger.WithError(err).Error("order send error")
-				}
-			}
-			s.producer.Flush(1000)
+				"customer":      customerCount,
+				"order":         orderCount,
+				"delivered_ok":  deliveredOK - lastDeliveryOK,
+				"delivered_err": deliveredErr - lastDeliveryErr,
+			}).Info("tick summary")
+			lastDeliveryOK = deliveredOK
+			lastDeliveryErr = deliveredErr
 		}
 	}
 }
 
 func (s *producerService) Close() error {
-	if s.producer != nil {
-		s.producer.Flush(5000)
-		s.producer.Close()
-	}
+	s.closeOnce.Do(func() {
+		if s.producer != nil {
+			s.flushBestEffort(shutdownFlushTimeoutMs)
+			s.producer.Close()
+		}
+	})
 	return nil
 }
 
@@ -174,7 +164,7 @@ func (s *producerService) buildCustomerEvent(customerID string) customerEvent {
 	return s.custStore.put(customerEvent{
 		EventID:    uuid.NewString(),
 		EventTime:  time.Now().UTC().Format(time.RFC3339Nano),
-		EventType:  "CUSTOMER_CREATED",
+		EventType:  customerCreatedEvent,
 		CustomerID: customerID,
 	})
 }
@@ -196,7 +186,7 @@ func (s *producerService) buildOrderEvent(customerID string) orderEvent {
 	return s.orderStore.put(orderEvent{
 		EventID:     uuid.NewString(),
 		EventTime:   time.Now().UTC().Format(time.RFC3339Nano),
-		EventType:   "ORDER_CREATED",
+		EventType:   orderCreatedEvent,
 		OrderID:     orderID,
 		CustomerID:  customerID,
 		TotalAmount: randomAmount(s.rng),
@@ -211,6 +201,52 @@ func (s *producerService) pickCustomerID(forceExisting bool) string {
 	return s.pool.pick(s.rng, forceExisting)
 }
 
+func (s *producerService) logConfig() {
+	s.logger.WithFields(logrus.Fields{
+		"interval":         s.cfg.Interval.String(),
+		"size":             s.cfg.Size,
+		"ratio":            s.cfg.CustomerRatio,
+		"dup_percent":      s.cfg.DupPercent,
+		"customer_upgrade": s.cfg.CustomerUpgradePercent,
+		"order_upgrade":    s.cfg.OrderUpgradePercent,
+		"customer_pool":    s.cfg.CustomerPoolSize,
+	}).Info("producer config")
+	if s.cfg.FixedCustomerID != "" {
+		s.logger.WithField("customer_id", s.cfg.FixedCustomerID).Info("fixed customer id")
+	}
+}
+
+func (s *producerService) tickOnce() (int, int) {
+	customerCount, orderCount := splitCounts(s.cfg.Size, s.cfg.CustomerRatio)
+	s.logger.WithFields(logrus.Fields{
+		"customer": customerCount,
+		"order":    orderCount,
+	}).Info("tick send")
+	s.produceCustomers(customerCount)
+	s.produceOrders(orderCount)
+	return customerCount, orderCount
+}
+
+func (s *producerService) produceCustomers(count int) {
+	for i := 0; i < count; i++ {
+		customerID := s.pickCustomerID(rollPercent(s.rng, s.cfg.CustomerUpgradePercent))
+		customerEvt := s.buildCustomerEvent(customerID)
+		if err := s.sendEvent(s.customerTopic, customerEvt.CustomerID, customerEvt); err != nil {
+			s.logger.WithError(err).Error("customer send error")
+		}
+	}
+}
+
+func (s *producerService) produceOrders(count int) {
+	for i := 0; i < count; i++ {
+		customerID := s.pickCustomerID(true)
+		orderEvt := s.buildOrderEvent(customerID)
+		if err := s.sendEvent(s.orderTopic, orderEvt.CustomerID, orderEvt); err != nil {
+			s.logger.WithError(err).Error("order send error")
+		}
+	}
+}
+
 func (s *producerService) sendEvent(topic, key string, event any) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -222,6 +258,43 @@ func (s *producerService) sendEvent(topic, key string, event any) error {
 		Value:          payload,
 	}
 	return s.producer.Produce(msg, nil)
+}
+
+func (s *producerService) flushBestEffort(timeoutMs int) {
+	if s.producer == nil {
+		return
+	}
+	// TODO: make flush strategy configurable if needed.
+	s.producer.Flush(timeoutMs)
+}
+
+func (s *producerService) drainDeliveryReports(ctx context.Context, stats *deliveryStats) {
+	if s.producer == nil {
+		return
+	}
+	events := s.producer.Events()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			switch msg := ev.(type) {
+			case *kafka.Message:
+				if msg.TopicPartition.Error != nil {
+					stats.addErr()
+					s.logger.WithError(msg.TopicPartition.Error).Warn("delivery failed")
+				} else {
+					stats.addOK()
+				}
+			case kafka.Error:
+				stats.addErr()
+				s.logger.WithError(msg).Warn("producer error")
+			}
+		}
+	}
 }
 
 func (p *customerPool) pick(rng *rand.Rand, forceExisting bool) string {
@@ -296,4 +369,44 @@ func splitCounts(total int, customerRatio float64) (int, int) {
 	}
 	orderCount := total - customerCount
 	return customerCount, orderCount
+}
+
+func (c ProducerConfig) normalized() ProducerConfig {
+	cfg := c
+	if cfg.Interval <= 0 {
+		cfg.Interval = 3 * time.Second
+	}
+	if cfg.Size <= 0 {
+		cfg.Size = 1
+	}
+	if cfg.CustomerRatio < 0 {
+		cfg.CustomerRatio = 0
+	}
+	if cfg.CustomerRatio > 1 {
+		cfg.CustomerRatio = 1
+	}
+	cfg.DupPercent = clampPercent(cfg.DupPercent)
+	cfg.CustomerUpgradePercent = clampPercent(cfg.CustomerUpgradePercent)
+	cfg.OrderUpgradePercent = clampPercent(cfg.OrderUpgradePercent)
+	if cfg.CustomerPoolSize <= 0 {
+		cfg.CustomerPoolSize = 1
+	}
+	return cfg
+}
+
+type deliveryStats struct {
+	ok  uint64
+	err uint64
+}
+
+func (s *deliveryStats) addOK() {
+	atomic.AddUint64(&s.ok, 1)
+}
+
+func (s *deliveryStats) addErr() {
+	atomic.AddUint64(&s.err, 1)
+}
+
+func (s *deliveryStats) snapshot() (uint64, uint64) {
+	return atomic.LoadUint64(&s.ok), atomic.LoadUint64(&s.err)
 }

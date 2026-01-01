@@ -7,6 +7,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/sirupsen/logrus"
 
+	"order-summary-service/internal/date"
 	"order-summary-service/internal/service"
 )
 
@@ -63,8 +64,8 @@ func (c *monthlySummaryController) GetMonthlySummary(ctx fiber.Ctx) error {
 
 	resp := monthlySummaryResponse{
 		CustomerID: summary.CustomerID,
-		WindowFrom: formatDate(summary.WindowFrom),
-		WindowTo:   formatDate(summary.WindowTo),
+		WindowFrom: date.FormatYYYYMMDD(summary.WindowFrom),
+		WindowTo:   date.FormatYYYYMMDD(summary.WindowTo),
 		OrderCount: summary.OrderCount,
 		TotalSpend: summary.TotalSpend,
 		Currency:   summary.Currency,
@@ -79,8 +80,4 @@ func (c *monthlySummaryController) GetMonthlySummary(ctx fiber.Ctx) error {
 	}).Info("monthly summary served")
 
 	return ctx.JSON(resp)
-}
-
-func formatDate(value time.Time) string {
-	return value.UTC().Format("2006-01-02")
 }
