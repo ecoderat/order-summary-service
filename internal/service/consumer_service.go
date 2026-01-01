@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type consumerService struct {
 	consumer *kafka.Consumer
 	repo     repository.Repository
 	rdb      cache.Cache
+	cache    cache.Cache
 	ch       Closer
 
 	batchSize         int
@@ -76,6 +78,7 @@ func NewConsumerService(
 	repo repository.Repository,
 	rdb cache.Cache,
 	ch Closer,
+	cacheClient cache.Cache,
 	cfg ConsumerConfig,
 ) (ConsumerService, error) {
 	topics := filterTopics([]string{cfg.KafkaCustomerTopic, cfg.KafkaOrderTopic})
@@ -95,6 +98,7 @@ func NewConsumerService(
 		consumer:          consumer,
 		repo:              repo,
 		rdb:               rdb,
+		cache:             cacheClient,
 		ch:                ch,
 		batchSize:         batchSize,
 		batchInterval:     cfg.BatchInterval,
@@ -305,6 +309,8 @@ func (s *consumerService) flushOrderBatch(ctx context.Context, batch []orderBatc
 		}
 	}
 
+	s.invalidateOrderBatchCache(params)
+
 	log.Printf("order batch committed count=%d", len(batch))
 	return batch[:0]
 }
@@ -326,6 +332,27 @@ func (s *consumerService) unmarkOrderBatch(ctx context.Context, params []reposit
 			log.Printf("idempotency unmark error event_id=%s err=%v", item.SourceEventID, err)
 		}
 		unmarkCancel()
+	}
+}
+
+func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOrderParams) {
+	if s.cache == nil {
+		return
+	}
+	cacheDate := utcDate(time.Now().UTC()).Format("2006-01-02")
+	seen := make(map[string]struct{}, len(params))
+	fmt.Printf("len params: %d\n", len(params))
+	for _, item := range params {
+		seen[item.CustomerID] = struct{}{}
+	}
+	fmt.Printf("len seen: %d\n", len(seen))
+	fmt.Printf("seen: %v\n", seen)
+	for customerID := range seen {
+		ctx, cancel := context.WithTimeout(context.Background(), s.redisTimeout)
+		if err := s.cache.InvalidateMonthly(ctx, customerID, cacheDate); err != nil {
+			log.Printf("cache invalidate error customer_id=%s err=%v", customerID, err)
+		}
+		cancel()
 	}
 }
 

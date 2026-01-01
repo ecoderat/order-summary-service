@@ -46,10 +46,14 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 	windowFrom := windowTo.AddDate(0, 0, -30)
 	dateKey := windowTo.Format("2006-01-02")
 
+	logger.Infof("fetching monthly summary for window %s - %s", windowFrom.Format("2006-01-02"), windowTo.Format("2006-01-02"))
+	logger.Infof("checking cache for key: %s", dateKey)
+
 	if s.cache != nil {
 		if payload, hit, err := s.cache.CacheGet(ctx, customerID, dateKey); err != nil {
 			logger.WithError(err).Warn("cache get failed")
 		} else if hit {
+			logger.Infof("cache hit: %s", payload)
 			cached, err := decodeCacheEntry(payload)
 			if err != nil {
 				logger.WithError(err).Warn("cache decode failed")
@@ -68,6 +72,7 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 		}
 	}
 
+	logger.Info("cache miss")
 	exists, err := s.repo.CustomerExistsFinal(ctx, customerID)
 	if err != nil {
 		logger.WithError(err).Error("customer exists query failed")

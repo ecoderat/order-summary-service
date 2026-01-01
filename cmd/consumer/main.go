@@ -62,6 +62,7 @@ func main() {
 		repo,
 		rdb,
 		ch,
+		rdb,
 		service.ConsumerConfig{
 			KafkaCustomerTopic: cfg.KafkaCustomerTopic,
 			KafkaOrderTopic:    cfg.KafkaOrderTopic,
