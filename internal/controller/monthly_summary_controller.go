@@ -11,7 +11,7 @@ import (
 )
 
 type MonthlySummaryController interface {
-	HandleFiber(c fiber.Ctx) error
+	GetMonthlySummary(c fiber.Ctx) error
 }
 
 type monthlySummaryController struct {
@@ -36,7 +36,7 @@ func NewMonthlySummaryController(svc service.MonthlySummaryService, logger *logr
 	return &monthlySummaryController{svc: svc, logger: logger}
 }
 
-func (c *monthlySummaryController) HandleFiber(ctx fiber.Ctx) error {
+func (c *monthlySummaryController) GetMonthlySummary(ctx fiber.Ctx) error {
 	start := time.Now()
 	customerID := ctx.Params("customerId")
 	logger := c.logger.WithFields(logrus.Fields{

@@ -45,7 +45,7 @@ func main() {
 	summaryController := controller.NewMonthlySummaryController(summaryService, logrus.StandardLogger())
 
 	app := fiber.New()
-	app.Get("/v1/customers/:customerId/monthly-order-summary", summaryController.HandleFiber)
+	app.Get("/v1/customers/:customerId/monthly-order-summary", summaryController.GetMonthlySummary)
 
 	go func() {
 		<-ctx.Done()

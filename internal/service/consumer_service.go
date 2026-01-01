@@ -9,6 +9,7 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 
 	"order-summary-service/internal/cache"
+	"order-summary-service/internal/date"
 	"order-summary-service/internal/models"
 	"order-summary-service/internal/repository"
 )
@@ -345,7 +346,7 @@ func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOr
 	if s.cache == nil {
 		return
 	}
-	cacheDate := utcDate(time.Now().UTC()).Format("2006-01-02")
+	cacheDate := date.ToStartOfDay(time.Now().UTC()).Format("2006-01-02")
 	seen := make(map[string]struct{}, len(params))
 	for _, item := range params {
 		seen[item.CustomerID] = struct{}{}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os/signal"
 	"syscall"
@@ -9,6 +10,7 @@ import (
 
 	"order-summary-service/internal/cache"
 	"order-summary-service/internal/config"
+	"order-summary-service/internal/date"
 	"order-summary-service/internal/db"
 	"order-summary-service/internal/repository"
 )
@@ -86,14 +88,18 @@ func main() {
 			continue
 		}
 
-		windowTo := utcDate(asOfDate)
+		windowTo := date.ToStartOfDay(asOfDate)
 		windowFrom := windowTo.AddDate(0, 0, -30)
 
-		summary, found, err := repo.MonthlySummaryFinal(ctx, job.CustomerID, windowFrom, windowTo)
-		if err != nil {
+		summary, err := repo.MonthlySummaryFinal(ctx, job.CustomerID, windowFrom, windowTo)
+		found := true
+		if err != nil && !errors.Is(err, repository.ErrMonthlySummaryNotFound) {
 			log.Printf("monthly summary error customer_id=%s err=%v", job.CustomerID, err)
 			_ = cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate)
 			continue
+		} else if errors.Is(err, repository.ErrMonthlySummaryNotFound) {
+			found = false
+			summary = repository.MonthlySummary{}
 		}
 
 		entry := cache.MonthlySummaryEntry{
@@ -129,8 +135,4 @@ func main() {
 
 		log.Printf("refreshed cache customer_id=%s asof=%s", job.CustomerID, job.AsOfDate)
 	}
-}
-
-func utcDate(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }

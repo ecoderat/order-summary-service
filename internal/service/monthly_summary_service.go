@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"order-summary-service/internal/cache"
+	"order-summary-service/internal/date"
 	"order-summary-service/internal/repository"
 )
 
@@ -61,7 +62,7 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 	start := time.Now()
 	logger := logrus.WithField("customer_id", customerID)
 
-	windowTo := utcDate(time.Now().UTC())
+	windowTo := date.ToStartOfDay(time.Now().UTC())
 	windowFrom := windowTo.AddDate(0, 0, -30)
 	dateKey := cache.MonthlyDateString(windowTo)
 
@@ -130,28 +131,32 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 		return MonthlySummary{}, ErrCustomerNotFound
 	}
 
-	summary, found, err := s.repo.MonthlySummaryFinal(ctx, customerID, windowFrom, windowTo)
+	summary, err := s.repo.MonthlySummaryFinal(ctx, customerID, windowFrom, windowTo)
 	if err != nil {
+		if errors.Is(err, repository.ErrMonthlySummaryNotFound) {
+			logger.WithFields(logrus.Fields{
+				"window_from": windowFrom.Format("2006-01-02"),
+				"window_to":   windowTo.Format("2006-01-02"),
+				"duration_ms": time.Since(start).Milliseconds(),
+			}).Info("monthly summary empty")
+
+			result := MonthlySummary{
+				CustomerID: customerID,
+				WindowFrom: windowFrom,
+				WindowTo:   windowTo,
+				OrderCount: 0,
+				TotalSpend: 0,
+				Currency:   "",
+				Source:     "db",
+			}
+
+			s.cacheSet(customerID, dateKey, result, logger)
+
+			return result, nil
+		}
+
 		logger.WithError(err).Error("monthly summary query failed")
 		return MonthlySummary{}, err
-	}
-	if !found {
-		result := MonthlySummary{
-			CustomerID: customerID,
-			WindowFrom: windowFrom,
-			WindowTo:   windowTo,
-			OrderCount: 0,
-			TotalSpend: 0,
-			Currency:   "",
-			Source:     "db",
-		}
-		logger.WithFields(logrus.Fields{
-			"window_from": windowFrom.Format("2006-01-02"),
-			"window_to":   windowTo.Format("2006-01-02"),
-			"duration_ms": time.Since(start).Milliseconds(),
-		}).Info("monthly summary empty")
-		s.cacheSet(customerID, dateKey, result, logger)
-		return result, nil
 	}
 
 	totalSpend := summary.TotalSpend.InexactFloat64()
@@ -173,10 +178,6 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 
 	s.cacheSet(customerID, dateKey, result, logger)
 	return result, nil
-}
-
-func utcDate(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 func (s *monthlySummaryService) cacheSet(customerID, dateKey string, result MonthlySummary, logger *logrus.Entry) {

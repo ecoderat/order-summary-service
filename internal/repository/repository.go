@@ -20,6 +20,8 @@ type MonthlySummary struct {
 	Currency   string
 }
 
+var ErrMonthlySummaryNotFound = errors.New("monthly summary not found")
+
 type CreateCustomerParams struct {
 	CustomerID    string
 	CreatedAt     time.Time
@@ -38,11 +40,9 @@ type CreateOrderParams struct {
 
 // Repository defines the methods for interacting with the data store.
 type Repository interface {
-	CreateCustomer(ctx context.Context, params CreateCustomerParams) error
 	CreateCustomerBatch(ctx context.Context, customers []CreateCustomerParams) error
-	CreateOrder(ctx context.Context, params CreateOrderParams) error
 	CreateOrderBatch(ctx context.Context, orders []CreateOrderParams) error
-	MonthlySummaryFinal(ctx context.Context, customerID string, windowFrom, windowTo time.Time) (MonthlySummary, bool, error)
+	MonthlySummaryFinal(ctx context.Context, customerID string, windowFrom, windowTo time.Time) (MonthlySummary, error)
 	CustomerExistsFinal(ctx context.Context, customerID string) (bool, error)
 }
 
@@ -53,23 +53,6 @@ type repository struct {
 // NewRepository creates a new Repository instance.
 func NewRepository(conn clickhouse.Conn) Repository {
 	return &repository{conn: conn}
-}
-
-// CreateCustomer inserts a new customer record.
-func (r *repository) CreateCustomer(ctx context.Context, params CreateCustomerParams) error {
-	query := `INSERT INTO customers_current (customer_id, created_at, updated_at, source_event_id)`
-	eventUUID, err := uuid.Parse(params.SourceEventID)
-	if err != nil {
-		return err
-	}
-	batch, err := r.conn.PrepareBatch(ctx, query)
-	if err != nil {
-		return err
-	}
-	if err := batch.Append(params.CustomerID, params.CreatedAt, params.UpdatedAt, eventUUID); err != nil {
-		return err
-	}
-	return batch.Send()
 }
 
 // CreateCustomerBatch inserts multiple customer records in a batch.
@@ -101,24 +84,6 @@ func (r *repository) CreateCustomerBatch(ctx context.Context, customers []Create
 		}
 	}
 
-	return batch.Send()
-}
-
-// CreateOrder inserts a new order record.
-func (r *repository) CreateOrder(ctx context.Context, params CreateOrderParams) error {
-	query := `INSERT INTO orders_current (order_id, customer_id, order_time, total_amount, currency, source_event_id)`
-	eventUUID, err := uuid.Parse(params.SourceEventID)
-	if err != nil {
-		return err
-	}
-	amount := decimal.NewFromFloat(params.TotalAmount).Round(2)
-	batch, err := r.conn.PrepareBatch(ctx, query)
-	if err != nil {
-		return err
-	}
-	if err := batch.Append(params.OrderID, params.CustomerID, params.OrderTime, amount, params.Currency, eventUUID); err != nil {
-		return err
-	}
 	return batch.Send()
 }
 
@@ -167,18 +132,21 @@ func (r *repository) CustomerExistsFinal(ctx context.Context, customerID string)
 	LIMIT 1`
 
 	row := r.conn.QueryRow(ctx, query, customerID)
+
 	var one uint8
 	if err := row.Scan(&one); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
+
 		return false, err
 	}
+
 	return true, nil
 }
 
 // MonthlySummaryFinal retrieves the monthly summary for a customer using FINAL modifier.
-func (r *repository) MonthlySummaryFinal(ctx context.Context, customerID string, windowFrom, windowTo time.Time) (MonthlySummary, bool, error) {
+func (r *repository) MonthlySummaryFinal(ctx context.Context, customerID string, windowFrom, windowTo time.Time) (MonthlySummary, error) {
 	windowToExclusive := windowTo.AddDate(0, 0, 1)
 	query := `
 	SELECT
@@ -196,19 +164,21 @@ func (r *repository) MonthlySummaryFinal(ctx context.Context, customerID string,
 	`
 
 	row := r.conn.QueryRow(ctx, query, windowFrom, windowTo, customerID, windowFrom, windowToExclusive)
+
 	var summary MonthlySummary
-	if err := row.Scan(
+	err := row.Scan(
 		&summary.CustomerID,
 		&summary.WindowFrom,
 		&summary.WindowTo,
 		&summary.OrderCount,
 		&summary.TotalSpend,
 		&summary.Currency,
-	); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return MonthlySummary{}, false, nil
-		}
-		return MonthlySummary{}, false, err
+	)
+	if err != nil && errors.Is(err, sql.ErrNoRows) {
+		return MonthlySummary{}, ErrMonthlySummaryNotFound
+	} else if err != nil {
+		return MonthlySummary{}, err
 	}
-	return summary, true, nil
+
+	return summary, nil
 }
