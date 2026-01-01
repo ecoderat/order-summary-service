@@ -10,6 +10,7 @@ require (
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/shopspring/decimal v1.4.0
 	github.com/sirupsen/logrus v1.9.3
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
@@ -33,7 +34,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tinylib/msgp v1.5.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.68.0 // indirect
