@@ -27,6 +27,7 @@ type ProducerConfig struct {
 	CustomerUpgradePercent int
 	OrderUpgradePercent    int
 	CustomerPoolSize       int
+	FixedCustomerID        string
 }
 
 type producerService struct {
@@ -108,6 +109,9 @@ func (s *producerService) Run(ctx context.Context) error {
 	log.Printf("interval=%s size=%d ratio=%.2f dup=%d%% customer_upgrade=%d%% order_upgrade=%d%% customer_pool=%d",
 		s.cfg.Interval, s.cfg.Size, s.cfg.CustomerRatio, s.cfg.DupPercent,
 		s.cfg.CustomerUpgradePercent, s.cfg.OrderUpgradePercent, s.cfg.CustomerPoolSize)
+	if s.cfg.FixedCustomerID != "" {
+		log.Printf("fixed customer_id=%s", s.cfg.FixedCustomerID)
+	}
 
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
@@ -120,14 +124,14 @@ func (s *producerService) Run(ctx context.Context) error {
 			customerCount, orderCount := splitCounts(s.cfg.Size, s.cfg.CustomerRatio)
 			log.Printf("tick send customer=%d order=%d", customerCount, orderCount)
 			for i := 0; i < customerCount; i++ {
-				customerID := s.pool.pick(s.rng, rollPercent(s.rng, s.cfg.CustomerUpgradePercent))
+				customerID := s.pickCustomerID(rollPercent(s.rng, s.cfg.CustomerUpgradePercent))
 				customerEvt := s.buildCustomerEvent(customerID)
 				if err := s.sendEvent(s.customerTopic, customerEvt.CustomerID, customerEvt); err != nil {
 					log.Printf("customer send error: %v", err)
 				}
 			}
 			for i := 0; i < orderCount; i++ {
-				customerID := s.pool.pick(s.rng, true)
+				customerID := s.pickCustomerID(true)
 				orderEvt := s.buildOrderEvent(customerID)
 				if err := s.sendEvent(s.orderTopic, orderEvt.CustomerID, orderEvt); err != nil {
 					log.Printf("order send error: %v", err)
@@ -184,6 +188,13 @@ func (s *producerService) buildOrderEvent(customerID string) orderEvent {
 		TotalAmount: randomAmount(s.rng),
 		Currency:    currencyDefault,
 	})
+}
+
+func (s *producerService) pickCustomerID(forceExisting bool) string {
+	if s.cfg.FixedCustomerID != "" {
+		return s.cfg.FixedCustomerID
+	}
+	return s.pool.pick(s.rng, forceExisting)
 }
 
 func (s *producerService) sendEvent(topic, key string, event any) error {

@@ -28,6 +28,9 @@ type Config struct {
 	ConsumerBatchSize     int
 	ConsumerBatchInterval time.Duration
 	CacheTTL              time.Duration
+	HotTTL                time.Duration
+	PendingTTL            time.Duration
+	LockTTL               time.Duration
 	HTTPAddr              string
 	IdempotencyTTL        time.Duration
 }
@@ -55,6 +58,9 @@ func Load(serviceName string) Config {
 		ConsumerBatchSize:     envIntOrDefault("CONSUMER_BATCH_SIZE", 1000),
 		ConsumerBatchInterval: time.Duration(envIntOrDefault("CONSUMER_BATCH_INTERVAL_MS", 2000)) * time.Millisecond,
 		CacheTTL:              time.Duration(envIntOrDefault("CACHE_TTL_HOURS", 28)) * time.Hour,
+		HotTTL:                time.Duration(envIntOrDefault("HOT_TTL_HOURS", 2)) * time.Hour,
+		PendingTTL:            time.Duration(envIntOrDefault("PENDING_TTL_SECONDS", 30)) * time.Second,
+		LockTTL:               time.Duration(envIntOrDefault("LOCK_TTL_SECONDS", 5)) * time.Second,
 		HTTPAddr:              envOrDefault("HTTP_ADDR", ":8080"),
 		IdempotencyTTL:        time.Duration(envIntOrDefault("IDEMPOTENCY_TTL_HOURS", 60*24)) * time.Hour,
 	}

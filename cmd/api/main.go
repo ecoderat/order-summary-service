@@ -41,7 +41,7 @@ func main() {
 		}
 	}()
 
-	summaryService := service.NewMonthlySummaryService(repo, cacheClient, cfg.CacheTTL)
+	summaryService := service.NewMonthlySummaryService(repo, cacheClient, cfg.CacheTTL, cfg.HotTTL, cfg.LockTTL)
 	summaryController := controller.NewMonthlySummaryController(summaryService, logrus.StandardLogger())
 
 	app := fiber.New()

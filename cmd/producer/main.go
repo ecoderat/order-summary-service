@@ -54,6 +54,7 @@ func parseFlags() service.ProducerConfig {
 	flag.IntVar(&cfg.CustomerUpgradePercent, "customer-upgrade-percent", 0, "Customer upgrade percent (0-100)")
 	flag.IntVar(&cfg.OrderUpgradePercent, "order-upgrade-percent", 0, "Order upgrade percent (0-100)")
 	flag.IntVar(&cfg.CustomerPoolSize, "customer-pool", 50, "Customer ID pool size")
+	flag.StringVar(&cfg.FixedCustomerID, "customer-id", "", "Fixed customer ID for all events (optional)")
 	flag.Parse()
 	return cfg
 }

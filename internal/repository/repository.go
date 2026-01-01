@@ -42,7 +42,7 @@ type Repository interface {
 	CreateCustomerBatch(ctx context.Context, customers []CreateCustomerParams) error
 	CreateOrder(ctx context.Context, params CreateOrderParams) error
 	CreateOrderBatch(ctx context.Context, orders []CreateOrderParams) error
-	MonthlySummaryFinal(ctx context.Context, customerID string) (MonthlySummary, bool, error)
+	MonthlySummaryFinal(ctx context.Context, customerID string, windowFrom, windowTo time.Time) (MonthlySummary, bool, error)
 	CustomerExistsFinal(ctx context.Context, customerID string) (bool, error)
 }
 
@@ -178,25 +178,24 @@ func (r *repository) CustomerExistsFinal(ctx context.Context, customerID string)
 }
 
 // MonthlySummaryFinal retrieves the monthly summary for a customer using FINAL modifier.
-func (r *repository) MonthlySummaryFinal(ctx context.Context, customerID string) (MonthlySummary, bool, error) {
+func (r *repository) MonthlySummaryFinal(ctx context.Context, customerID string, windowFrom, windowTo time.Time) (MonthlySummary, bool, error) {
+	windowToExclusive := windowTo.AddDate(0, 0, 1)
 	query := `
-WITH
-  toDate(now('UTC')) AS window_to,
-  (window_to - 30)   AS window_from
-SELECT
-  customer_id,
-  window_from,
-  window_to,
-  count() AS order_count,
-  sum(total_amount) AS total_spend,
-  any(currency)     AS currency
-FROM orders_current FINAL
-WHERE customer_id = ?
-  AND order_time >= toDateTime(window_from, 'UTC')
-  AND order_time <  toDateTime(window_to + 1, 'UTC')
-GROUP BY customer_id`
+	SELECT
+		customer_id,
+		? AS window_from,
+		? AS window_to,
+		count() AS order_count,
+		sum(total_amount) AS total_spend,
+		any(currency)     AS currency
+	FROM orders_current FINAL
+	WHERE customer_id = ?
+		AND order_time >= ?
+		AND order_time <  ?
+	GROUP BY customer_id
+	`
 
-	row := r.conn.QueryRow(ctx, query, customerID)
+	row := r.conn.QueryRow(ctx, query, windowFrom, windowTo, customerID, windowFrom, windowToExclusive)
 	var summary MonthlySummary
 	if err := row.Scan(
 		&summary.CustomerID,

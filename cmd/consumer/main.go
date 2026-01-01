@@ -71,6 +71,7 @@ func main() {
 			RedisTimeout:       cfg.RedisTimeout,
 			ClickHouseTimeout:  cfg.ClickHouseTimeout,
 			IdempotencyTTL:     cfg.IdempotencyTTL,
+			PendingTTL:         cfg.PendingTTL,
 		},
 	)
 	if err != nil {

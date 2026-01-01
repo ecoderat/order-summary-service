@@ -2,8 +2,8 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"math/rand"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -29,13 +29,32 @@ type MonthlySummary struct {
 }
 
 type monthlySummaryService struct {
-	repo     repository.Repository
-	cache    cache.Cache
-	cacheTTL time.Duration
+	repo      repository.Repository
+	cache     cache.Cache
+	cacheTTL  time.Duration
+	hotTTL    time.Duration
+	lockTTL   time.Duration
+	lockRetry int
 }
 
-func NewMonthlySummaryService(repo repository.Repository, cacheClient cache.Cache, cacheTTL time.Duration) MonthlySummaryService {
-	return &monthlySummaryService{repo: repo, cache: cacheClient, cacheTTL: cacheTTL}
+func NewMonthlySummaryService(repo repository.Repository, cacheClient cache.Cache, cacheTTL, hotTTL, lockTTL time.Duration) MonthlySummaryService {
+	if cacheTTL == 0 {
+		cacheTTL = 28 * time.Hour
+	}
+	if hotTTL == 0 {
+		hotTTL = 2 * time.Hour
+	}
+	if lockTTL == 0 {
+		lockTTL = 5 * time.Second
+	}
+	return &monthlySummaryService{
+		repo:      repo,
+		cache:     cacheClient,
+		cacheTTL:  cacheTTL,
+		hotTTL:    hotTTL,
+		lockTTL:   lockTTL,
+		lockRetry: 2,
+	}
 }
 
 func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerID string) (MonthlySummary, error) {
@@ -44,17 +63,18 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 
 	windowTo := utcDate(time.Now().UTC())
 	windowFrom := windowTo.AddDate(0, 0, -30)
-	dateKey := windowTo.Format("2006-01-02")
+	dateKey := cache.MonthlyDateString(windowTo)
 
-	logger.Infof("fetching monthly summary for window %s - %s", windowFrom.Format("2006-01-02"), windowTo.Format("2006-01-02"))
-	logger.Infof("checking cache for key: %s", dateKey)
-
+	lockAcquired := false
 	if s.cache != nil {
+		if err := s.cache.MarkMonthlyHot(ctx, customerID, dateKey, s.hotTTL); err != nil {
+			logger.WithError(err).Warn("hot marker set failed")
+		}
+
 		if payload, hit, err := s.cache.CacheGet(ctx, customerID, dateKey); err != nil {
 			logger.WithError(err).Warn("cache get failed")
 		} else if hit {
-			logger.Infof("cache hit: %s", payload)
-			cached, err := decodeCacheEntry(payload)
+			cached, err := cache.DecodeMonthlySummary(payload)
 			if err != nil {
 				logger.WithError(err).Warn("cache decode failed")
 			} else {
@@ -70,9 +90,36 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 				}, nil
 			}
 		}
+
+		if locked, err := s.cache.AcquireMonthlyLock(ctx, customerID, dateKey, s.lockTTL); err != nil {
+			logger.WithError(err).Warn("lock acquire failed")
+		} else if !locked {
+			for i := 0; i < s.lockRetry; i++ {
+				jitterSleep()
+				if payload, hit, err := s.cache.CacheGet(ctx, customerID, dateKey); err == nil && hit {
+					cached, err := cache.DecodeMonthlySummary(payload)
+					if err == nil {
+						logger.WithField("duration_ms", time.Since(start).Milliseconds()).Info("monthly summary cache hit after retry")
+						return MonthlySummary{
+							CustomerID: cached.CustomerID,
+							WindowFrom: cached.WindowFrom,
+							WindowTo:   cached.WindowTo,
+							OrderCount: cached.OrderCount,
+							TotalSpend: cached.TotalSpend,
+							Currency:   cached.Currency,
+							Source:     "cache",
+						}, nil
+					}
+				}
+			}
+		} else {
+			lockAcquired = true
+		}
+	}
+	if lockAcquired {
+		defer s.releaseLock(customerID, dateKey, true, logger)
 	}
 
-	logger.Info("cache miss")
 	exists, err := s.repo.CustomerExistsFinal(ctx, customerID)
 	if err != nil {
 		logger.WithError(err).Error("customer exists query failed")
@@ -83,7 +130,7 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 		return MonthlySummary{}, ErrCustomerNotFound
 	}
 
-	summary, found, err := s.repo.MonthlySummaryFinal(ctx, customerID)
+	summary, found, err := s.repo.MonthlySummaryFinal(ctx, customerID, windowFrom, windowTo)
 	if err != nil {
 		logger.WithError(err).Error("monthly summary query failed")
 		return MonthlySummary{}, err
@@ -132,28 +179,11 @@ func utcDate(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
-type cacheEntry struct {
-	CustomerID string    `json:"customer_id"`
-	WindowFrom time.Time `json:"window_from"`
-	WindowTo   time.Time `json:"window_to"`
-	OrderCount uint64    `json:"order_count"`
-	TotalSpend float64   `json:"total_spend"`
-	Currency   string    `json:"currency"`
-}
-
-func decodeCacheEntry(payload string) (cacheEntry, error) {
-	var entry cacheEntry
-	if err := json.Unmarshal([]byte(payload), &entry); err != nil {
-		return cacheEntry{}, err
-	}
-	return entry, nil
-}
-
 func (s *monthlySummaryService) cacheSet(customerID, dateKey string, result MonthlySummary, logger *logrus.Entry) {
 	if s.cache == nil {
 		return
 	}
-	entry := cacheEntry{
+	entry := cache.MonthlySummaryEntry{
 		CustomerID: result.CustomerID,
 		WindowFrom: result.WindowFrom,
 		WindowTo:   result.WindowTo,
@@ -161,12 +191,25 @@ func (s *monthlySummaryService) cacheSet(customerID, dateKey string, result Mont
 		TotalSpend: result.TotalSpend,
 		Currency:   result.Currency,
 	}
-	payload, err := json.Marshal(entry)
+	payload, err := cache.EncodeMonthlySummary(entry)
 	if err != nil {
 		logger.WithError(err).Warn("cache encode failed")
 		return
 	}
-	if err := s.cache.CacheSet(context.Background(), customerID, dateKey, string(payload), s.cacheTTL); err != nil {
+	if err := s.cache.CacheSet(context.Background(), customerID, dateKey, payload, s.cacheTTL); err != nil {
 		logger.WithError(err).Warn("cache set failed")
 	}
+}
+
+func (s *monthlySummaryService) releaseLock(customerID, dateKey string, acquired bool, logger *logrus.Entry) {
+	if s.cache == nil || !acquired {
+		return
+	}
+	if err := s.cache.ReleaseMonthlyLock(context.Background(), customerID, dateKey); err != nil {
+		logger.WithError(err).Warn("lock release failed")
+	}
+}
+
+func jitterSleep() {
+	time.Sleep(time.Duration(50+rand.Intn(100)) * time.Millisecond)
 }

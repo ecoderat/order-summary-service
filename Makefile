@@ -1,4 +1,4 @@
-BINS := producer consumer api
+BINS := producer consumer api cache-refresher
 
 .PHONY: build
 build:

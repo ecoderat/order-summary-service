@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -31,6 +30,7 @@ type consumerService struct {
 	redisTimeout      time.Duration
 	clickhouseTimeout time.Duration
 	idempotencyTTL    time.Duration
+	pendingTTL        time.Duration
 
 	customerBatch []customerBatchItem
 	orderBatch    []orderBatchItem
@@ -46,6 +46,7 @@ type ConsumerConfig struct {
 	RedisTimeout       time.Duration
 	ClickHouseTimeout  time.Duration
 	IdempotencyTTL     time.Duration
+	PendingTTL         time.Duration
 }
 
 type customerBatchItem struct {
@@ -93,6 +94,10 @@ func NewConsumerService(
 	if batchSize <= 0 {
 		batchSize = 1
 	}
+	pendingTTL := cfg.PendingTTL
+	if pendingTTL <= 0 {
+		pendingTTL = 30 * time.Second
+	}
 
 	return &consumerService{
 		consumer:          consumer,
@@ -105,6 +110,7 @@ func NewConsumerService(
 		redisTimeout:      cfg.RedisTimeout,
 		clickhouseTimeout: cfg.ClickHouseTimeout,
 		idempotencyTTL:    cfg.IdempotencyTTL,
+		pendingTTL:        pendingTTL,
 		customerBatch:     make([]customerBatchItem, 0, batchSize),
 		orderBatch:        make([]orderBatchItem, 0, batchSize),
 		nextFlush:         time.Now().Add(cfg.BatchInterval),
@@ -341,18 +347,35 @@ func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOr
 	}
 	cacheDate := utcDate(time.Now().UTC()).Format("2006-01-02")
 	seen := make(map[string]struct{}, len(params))
-	fmt.Printf("len params: %d\n", len(params))
 	for _, item := range params {
 		seen[item.CustomerID] = struct{}{}
 	}
-	fmt.Printf("len seen: %d\n", len(seen))
-	fmt.Printf("seen: %v\n", seen)
 	for customerID := range seen {
 		ctx, cancel := context.WithTimeout(context.Background(), s.redisTimeout)
 		if err := s.cache.InvalidateMonthly(ctx, customerID, cacheDate); err != nil {
 			log.Printf("cache invalidate error customer_id=%s err=%v", customerID, err)
 		}
 		cancel()
+
+		hot, err := s.cache.IsMonthlyHot(context.Background(), customerID, cacheDate)
+		if err != nil {
+			log.Printf("hot check error customer_id=%s err=%v", customerID, err)
+			continue
+		}
+		if !hot {
+			continue
+		}
+		pending, err := s.cache.TrySetPending(context.Background(), customerID, cacheDate, s.pendingTTL)
+		if err != nil {
+			log.Printf("pending set error customer_id=%s err=%v", customerID, err)
+			continue
+		}
+		if pending {
+			job := cache.RefreshJob{CustomerID: customerID, AsOfDate: cacheDate}
+			if err := s.cache.EnqueueRefreshJob(context.Background(), job); err != nil {
+				log.Printf("refresh enqueue error customer_id=%s err=%v", customerID, err)
+			}
+		}
 	}
 }
 
