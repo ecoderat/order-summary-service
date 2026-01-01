@@ -36,9 +36,13 @@ type monthlySummaryService struct {
 	hotTTL    time.Duration
 	lockTTL   time.Duration
 	lockRetry int
+	logger    *logrus.Logger
 }
 
-func NewMonthlySummaryService(repo repository.Repository, cacheClient cache.Cache, cacheTTL, hotTTL, lockTTL time.Duration) MonthlySummaryService {
+func NewMonthlySummaryService(repo repository.Repository, cacheClient cache.Cache, logger *logrus.Logger, cacheTTL, hotTTL, lockTTL time.Duration) MonthlySummaryService {
+	if logger == nil {
+		logger = logrus.StandardLogger()
+	}
 	if cacheTTL == 0 {
 		cacheTTL = 28 * time.Hour
 	}
@@ -55,12 +59,13 @@ func NewMonthlySummaryService(repo repository.Repository, cacheClient cache.Cach
 		hotTTL:    hotTTL,
 		lockTTL:   lockTTL,
 		lockRetry: 2,
+		logger:    logger,
 	}
 }
 
 func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerID string) (MonthlySummary, error) {
 	start := time.Now()
-	logger := logrus.WithField("customer_id", customerID)
+	logger := s.logger.WithField("customer_id", customerID)
 
 	windowTo := date.ToStartOfDay(time.Now().UTC())
 	windowFrom := windowTo.AddDate(0, 0, -30)

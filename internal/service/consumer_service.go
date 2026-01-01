@@ -2,11 +2,11 @@ package service
 
 import (
 	"context"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/sirupsen/logrus"
 
 	"order-summary-service/internal/cache"
 	"order-summary-service/internal/date"
@@ -22,9 +22,9 @@ type ConsumerService interface {
 type consumerService struct {
 	consumer *kafka.Consumer
 	repo     repository.Repository
-	rdb      cache.Cache
 	cache    cache.Cache
 	ch       Closer
+	logger   *logrus.Logger
 
 	batchSize         int
 	batchInterval     time.Duration
@@ -78,11 +78,14 @@ type batchResult struct {
 func NewConsumerService(
 	consumer *kafka.Consumer,
 	repo repository.Repository,
-	rdb cache.Cache,
-	ch Closer,
 	cacheClient cache.Cache,
+	ch Closer,
+	logger *logrus.Logger,
 	cfg ConsumerConfig,
 ) (ConsumerService, error) {
+	if logger == nil {
+		logger = logrus.StandardLogger()
+	}
 	topics := filterTopics([]string{cfg.KafkaCustomerTopic, cfg.KafkaOrderTopic})
 	if len(topics) == 0 {
 		return nil, ErrNoTopics
@@ -103,9 +106,9 @@ func NewConsumerService(
 	return &consumerService{
 		consumer:          consumer,
 		repo:              repo,
-		rdb:               rdb,
 		cache:             cacheClient,
 		ch:                ch,
+		logger:            logger,
 		batchSize:         batchSize,
 		batchInterval:     cfg.BatchInterval,
 		redisTimeout:      cfg.RedisTimeout,
@@ -145,7 +148,7 @@ func (s *consumerService) Run(ctx context.Context) error {
 			// log.Printf("message received topic=%s partition=%d offset=%d key=%s bytes=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset, string(e.Key), len(e.Value))
 			batchType, err := s.processMessage(ctx, e.Value)
 			if err != nil {
-				log.Printf("message processing error: %v", err)
+				s.logger.WithError(err).Error("message processing error")
 				continue
 			}
 			switch batchType.kind {
@@ -167,19 +170,23 @@ func (s *consumerService) Run(ctx context.Context) error {
 				}
 			case batchDuplicate:
 				if _, err := s.consumer.CommitMessage(e); err != nil {
-					log.Printf("commit error topic=%s err=%v", *e.TopicPartition.Topic, err)
+					s.logger.WithError(err).WithField("topic", *e.TopicPartition.Topic).Error("commit error")
 				} else {
-					log.Printf("committed topic=%s partition=%d offset=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset)
+					s.logger.WithFields(logrus.Fields{
+						"topic":     *e.TopicPartition.Topic,
+						"partition": e.TopicPartition.Partition,
+						"offset":    e.TopicPartition.Offset,
+					}).Info("committed duplicate")
 				}
 			}
 		case kafka.Error:
 			if e.Code() == kafka.ErrPartitionEOF {
-				log.Printf("partition EOF: %v", e)
+				s.logger.WithError(e).Debug("partition EOF")
 				continue
 			}
-			log.Printf("kafka error: %v", e)
+			s.logger.WithError(e).Error("kafka error")
 		default:
-			log.Printf("kafka event: %v", e)
+			s.logger.WithField("event", e).Debug("kafka event")
 		}
 	}
 }
@@ -188,8 +195,8 @@ func (s *consumerService) Close() error {
 	if s.consumer != nil {
 		_ = s.consumer.Close()
 	}
-	if s.rdb != nil {
-		_ = s.rdb.Close()
+	if s.cache != nil {
+		_ = s.cache.Close()
 	}
 	if s.ch != nil {
 		_ = s.ch.Close()
@@ -213,7 +220,10 @@ func (s *consumerService) processMessage(ctx context.Context, payload []byte) (b
 		if duplicate, err := s.checkIdempotency(ctx, evt.EventID); err != nil {
 			return batchResult{kind: batchUnknown}, err
 		} else if duplicate {
-			log.Printf("duplicate customer event_id=%s customer_id=%s", evt.EventID, evt.CustomerID)
+			s.logger.WithFields(logrus.Fields{
+				"event_id":    evt.EventID,
+				"customer_id": evt.CustomerID,
+			}).Info("duplicate customer event")
 			return batchResult{kind: batchDuplicate}, nil
 		}
 		return batchResult{
@@ -233,7 +243,10 @@ func (s *consumerService) processMessage(ctx context.Context, payload []byte) (b
 		if duplicate, err := s.checkIdempotency(ctx, evt.EventID); err != nil {
 			return batchResult{kind: batchUnknown}, err
 		} else if duplicate {
-			log.Printf("duplicate order event_id=%s customer_id=%s", evt.EventID, evt.CustomerID)
+			s.logger.WithFields(logrus.Fields{
+				"event_id":    evt.EventID,
+				"customer_id": evt.CustomerID,
+			}).Info("duplicate order event")
 			return batchResult{kind: batchDuplicate}, nil
 		}
 		return batchResult{
@@ -254,7 +267,7 @@ func (s *consumerService) processMessage(ctx context.Context, payload []byte) (b
 
 func (s *consumerService) checkIdempotency(ctx context.Context, eventID string) (bool, error) {
 	redisCtx, redisCancel := context.WithTimeout(ctx, s.redisTimeout)
-	marked, err := s.rdb.CheckAndMarkEvent(redisCtx, eventID, s.idempotencyTTL)
+	marked, err := s.cache.CheckAndMarkEvent(redisCtx, eventID, s.idempotencyTTL)
 	redisCancel()
 	if err != nil {
 		return false, err
@@ -276,18 +289,18 @@ func (s *consumerService) flushCustomerBatch(ctx context.Context, batch []custom
 	err := s.repo.CreateCustomerBatch(chCtx, params)
 	chCancel()
 	if err != nil {
-		log.Printf("clickhouse insert customer batch error count=%d err=%v", len(params), err)
+		s.logger.WithError(err).WithField("count", len(params)).Error("customer batch insert failed")
 		s.unmarkCustomerBatch(context.Background(), params)
 		return batch
 	}
 
 	for _, item := range batch {
 		if _, err := s.consumer.CommitMessage(item.message); err != nil {
-			log.Printf("commit error topic=%s err=%v", *item.message.TopicPartition.Topic, err)
+			s.logger.WithError(err).WithField("topic", *item.message.TopicPartition.Topic).Error("commit error")
 		}
 	}
 
-	log.Printf("customer batch committed count=%d", len(batch))
+	s.logger.WithField("count", len(batch)).Info("customer batch committed")
 	return batch[:0]
 }
 
@@ -305,28 +318,28 @@ func (s *consumerService) flushOrderBatch(ctx context.Context, batch []orderBatc
 	err := s.repo.CreateOrderBatch(chCtx, params)
 	chCancel()
 	if err != nil {
-		log.Printf("clickhouse insert order batch error count=%d err=%v", len(params), err)
+		s.logger.WithError(err).WithField("count", len(params)).Error("order batch insert failed")
 		s.unmarkOrderBatch(context.Background(), params)
 		return batch
 	}
 
 	for _, item := range batch {
 		if _, err := s.consumer.CommitMessage(item.message); err != nil {
-			log.Printf("commit error topic=%s err=%v", *item.message.TopicPartition.Topic, err)
+			s.logger.WithError(err).WithField("topic", *item.message.TopicPartition.Topic).Error("commit error")
 		}
 	}
 
 	s.invalidateOrderBatchCache(params)
 
-	log.Printf("order batch committed count=%d", len(batch))
+	s.logger.WithField("count", len(batch)).Info("order batch committed")
 	return batch[:0]
 }
 
 func (s *consumerService) unmarkCustomerBatch(ctx context.Context, params []repository.CreateCustomerParams) {
 	for _, item := range params {
 		unmarkCtx, unmarkCancel := context.WithTimeout(ctx, s.redisTimeout)
-		if err := s.rdb.UnmarkEvent(unmarkCtx, item.SourceEventID); err != nil {
-			log.Printf("idempotency unmark error event_id=%s err=%v", item.SourceEventID, err)
+		if err := s.cache.UnmarkEvent(unmarkCtx, item.SourceEventID); err != nil {
+			s.logger.WithError(err).WithField("event_id", item.SourceEventID).Warn("idempotency unmark failed")
 		}
 		unmarkCancel()
 	}
@@ -335,8 +348,8 @@ func (s *consumerService) unmarkCustomerBatch(ctx context.Context, params []repo
 func (s *consumerService) unmarkOrderBatch(ctx context.Context, params []repository.CreateOrderParams) {
 	for _, item := range params {
 		unmarkCtx, unmarkCancel := context.WithTimeout(ctx, s.redisTimeout)
-		if err := s.rdb.UnmarkEvent(unmarkCtx, item.SourceEventID); err != nil {
-			log.Printf("idempotency unmark error event_id=%s err=%v", item.SourceEventID, err)
+		if err := s.cache.UnmarkEvent(unmarkCtx, item.SourceEventID); err != nil {
+			s.logger.WithError(err).WithField("event_id", item.SourceEventID).Warn("idempotency unmark failed")
 		}
 		unmarkCancel()
 	}
@@ -354,13 +367,13 @@ func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOr
 	for customerID := range seen {
 		ctx, cancel := context.WithTimeout(context.Background(), s.redisTimeout)
 		if err := s.cache.InvalidateMonthly(ctx, customerID, cacheDate); err != nil {
-			log.Printf("cache invalidate error customer_id=%s err=%v", customerID, err)
+			s.logger.WithError(err).WithField("customer_id", customerID).Warn("cache invalidate failed")
 		}
 		cancel()
 
 		hot, err := s.cache.IsMonthlyHot(context.Background(), customerID, cacheDate)
 		if err != nil {
-			log.Printf("hot check error customer_id=%s err=%v", customerID, err)
+			s.logger.WithError(err).WithField("customer_id", customerID).Warn("hot check failed")
 			continue
 		}
 		if !hot {
@@ -368,13 +381,13 @@ func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOr
 		}
 		pending, err := s.cache.TrySetPending(context.Background(), customerID, cacheDate, s.pendingTTL)
 		if err != nil {
-			log.Printf("pending set error customer_id=%s err=%v", customerID, err)
+			s.logger.WithError(err).WithField("customer_id", customerID).Warn("pending set failed")
 			continue
 		}
 		if pending {
 			job := cache.RefreshJob{CustomerID: customerID, AsOfDate: cacheDate}
 			if err := s.cache.EnqueueRefreshJob(context.Background(), job); err != nil {
-				log.Printf("refresh enqueue error customer_id=%s err=%v", customerID, err)
+				s.logger.WithError(err).WithField("customer_id", customerID).Warn("refresh enqueue failed")
 			}
 		}
 	}

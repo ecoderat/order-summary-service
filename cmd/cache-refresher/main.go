@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 	"os/signal"
 	"syscall"
 	"time"
@@ -13,6 +12,8 @@ import (
 	"order-summary-service/internal/date"
 	"order-summary-service/internal/db"
 	"order-summary-service/internal/repository"
+
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -22,18 +23,19 @@ const (
 
 func main() {
 	cfg := config.Load("cache-refresher")
-	log.Printf("starting %s", cfg.ServiceName)
+	logger := logrus.StandardLogger()
+	logger.WithField("service", cfg.ServiceName).Info("starting")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	ch, err := db.New(ctx, &cfg)
 	if err != nil {
-		log.Fatalf("clickhouse connect error: %v", err)
+		logger.WithError(err).Fatal("clickhouse connect error")
 	}
 	defer func() {
 		if err := ch.Close(); err != nil {
-			log.Printf("clickhouse close error: %v", err)
+			logger.WithError(err).Error("clickhouse close error")
 		}
 	}()
 
@@ -41,21 +43,21 @@ func main() {
 	cacheClient := cache.New(cfg.RedisAddr, cfg.RedisDB)
 	defer func() {
 		if err := cacheClient.Close(); err != nil {
-			log.Printf("cache close error: %v", err)
+			logger.WithError(err).Error("cache close error")
 		}
 	}()
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("shutting down %s", cfg.ServiceName)
+			logger.WithField("service", cfg.ServiceName).Info("shutting down")
 			return
 		default:
 		}
 
 		job, ok, err := cacheClient.DequeueRefreshJob(ctx, dequeueTimeout)
 		if err != nil {
-			log.Printf("refresh dequeue error: %v", err)
+			logger.WithError(err).Error("refresh dequeue error")
 			continue
 		}
 		if !ok {
@@ -63,7 +65,7 @@ func main() {
 		}
 
 		if job.CustomerID == "" || job.AsOfDate == "" {
-			log.Printf("invalid refresh job: %+v", job)
+			logger.WithField("job", job).Error("invalid refresh job")
 			continue
 		}
 
@@ -71,19 +73,19 @@ func main() {
 
 		asOfDate, err := time.Parse("2006-01-02", job.AsOfDate)
 		if err != nil {
-			log.Printf("invalid asof date %s", job.AsOfDate)
+			logger.WithField("as_of_date", job.AsOfDate).Error("invalid asof date")
 			_ = cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate)
 			continue
 		}
 
 		exists, err := repo.CustomerExistsFinal(ctx, job.CustomerID)
 		if err != nil {
-			log.Printf("customer exists error customer_id=%s err=%v", job.CustomerID, err)
+			logger.WithError(err).WithField("customer_id", job.CustomerID).Error("customer exists error")
 			_ = cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate)
 			continue
 		}
 		if !exists {
-			log.Printf("customer not found customer_id=%s", job.CustomerID)
+			logger.WithField("customer_id", job.CustomerID).Error("customer not found")
 			_ = cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate)
 			continue
 		}
@@ -94,7 +96,7 @@ func main() {
 		summary, err := repo.MonthlySummaryFinal(ctx, job.CustomerID, windowFrom, windowTo)
 		found := true
 		if err != nil && !errors.Is(err, repository.ErrMonthlySummaryNotFound) {
-			log.Printf("monthly summary error customer_id=%s err=%v", job.CustomerID, err)
+			logger.WithError(err).WithField("customer_id", job.CustomerID).Error("monthly summary error")
 			_ = cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate)
 			continue
 		} else if errors.Is(err, repository.ErrMonthlySummaryNotFound) {
@@ -118,21 +120,21 @@ func main() {
 
 		payload, err := cache.EncodeMonthlySummary(entry)
 		if err != nil {
-			log.Printf("cache encode error customer_id=%s err=%v", job.CustomerID, err)
+			logger.WithError(err).WithField("customer_id", job.CustomerID).Error("cache encode error")
 			_ = cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate)
 			continue
 		}
 
 		if err := cacheClient.CacheSet(ctx, job.CustomerID, job.AsOfDate, payload, cfg.CacheTTL); err != nil {
-			log.Printf("cache set error customer_id=%s err=%v", job.CustomerID, err)
+			logger.WithError(err).WithField("customer_id", job.CustomerID).Error("cache set error")
 			_ = cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate)
 			continue
 		}
 
 		if err := cacheClient.ClearPending(context.Background(), job.CustomerID, job.AsOfDate); err != nil {
-			log.Printf("clear pending error customer_id=%s err=%v", job.CustomerID, err)
+			logger.WithError(err).WithField("customer_id", job.CustomerID).Error("clear pending error")
 		}
 
-		log.Printf("refreshed cache customer_id=%s asof=%s", job.CustomerID, job.AsOfDate)
+		logger.WithField("customer_id", job.CustomerID).WithField("as_of_date", job.AsOfDate).Info("refreshed cache")
 	}
 }

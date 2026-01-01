@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/sirupsen/logrus"
 
 	"order-summary-service/internal/config"
 	"order-summary-service/internal/service"
@@ -16,7 +16,8 @@ import (
 
 func main() {
 	cfg := config.Load("kafka-producer-service")
-	log.Printf("starting %s", cfg.ServiceName)
+	logger := logrus.StandardLogger()
+	logger.WithField("service", cfg.ServiceName).Info("starting")
 
 	producerCfg := parseFlags()
 
@@ -24,16 +25,16 @@ func main() {
 		"bootstrap.servers": cfg.KafkaBrokers,
 	})
 	if err != nil {
-		log.Fatalf("kafka producer error: %v", err)
+		logger.WithError(err).Fatal("kafka producer error")
 	}
 
-	svc, err := service.NewProducerService(producer, cfg.KafkaCustomerTopic, cfg.KafkaOrderTopic, producerCfg)
+	svc, err := service.NewProducerService(producer, cfg.KafkaCustomerTopic, cfg.KafkaOrderTopic, logger, producerCfg)
 	if err != nil {
-		log.Fatalf("producer service error: %v", err)
+		logger.WithError(err).Fatal("producer service error")
 	}
 	defer func() {
 		if err := svc.Close(); err != nil {
-			log.Printf("producer close error: %v", err)
+			logger.WithError(err).Error("producer close error")
 		}
 	}()
 
@@ -41,7 +42,7 @@ func main() {
 	defer stop()
 
 	if err := svc.Run(ctx); err != nil && ctx.Err() == nil {
-		log.Printf("producer run error: %v", err)
+		logger.WithError(err).Error("producer run error")
 	}
 }
 

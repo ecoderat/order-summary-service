@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"log"
 	"os/signal"
 	"syscall"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/sirupsen/logrus"
 
 	"order-summary-service/internal/cache"
 	"order-summary-service/internal/config"
@@ -17,18 +17,19 @@ import (
 
 func main() {
 	cfg := config.Load("kafka-consumer-service")
-	log.Printf("starting %s", cfg.ServiceName)
+	logger := logrus.StandardLogger()
+	logger.WithField("service", cfg.ServiceName).Info("starting")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	ch, err := db.New(ctx, &cfg)
 	if err != nil {
-		log.Fatalf("clickhouse connect error: %v", err)
+		logger.WithError(err).Fatal("clickhouse connect error")
 	}
 	defer func() {
 		if err := ch.Close(); err != nil {
-			log.Printf("clickhouse close error: %v", err)
+			logger.WithError(err).Error("clickhouse close error")
 		}
 	}()
 
@@ -37,7 +38,7 @@ func main() {
 	rdb := cache.New(cfg.RedisAddr, cfg.RedisDB)
 	defer func() {
 		if err := rdb.Close(); err != nil {
-			log.Printf("redis close error: %v", err)
+			logger.WithError(err).Error("redis close error")
 		}
 	}()
 
@@ -49,11 +50,11 @@ func main() {
 		"enable.auto.offset.store": false,
 	})
 	if err != nil {
-		log.Fatalf("kafka consumer error: %v", err)
+		logger.WithError(err).Fatal("kafka consumer error")
 	}
 	defer func() {
 		if err := consumer.Close(); err != nil {
-			log.Printf("kafka consumer close error: %v", err)
+			logger.WithError(err).Error("kafka consumer close error")
 		}
 	}()
 
@@ -62,7 +63,7 @@ func main() {
 		repo,
 		rdb,
 		ch,
-		rdb,
+		logger,
 		service.ConsumerConfig{
 			KafkaCustomerTopic: cfg.KafkaCustomerTopic,
 			KafkaOrderTopic:    cfg.KafkaOrderTopic,
@@ -75,10 +76,10 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatalf("consumer service error: %v", err)
+		logger.WithError(err).Fatal("consumer service error")
 	}
 
 	if err := svc.Run(ctx); err != nil && ctx.Err() == nil {
-		log.Printf("consumer run error: %v", err)
+		logger.WithError(err).Error("consumer run error")
 	}
 }

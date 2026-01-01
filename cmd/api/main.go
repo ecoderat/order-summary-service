@@ -18,18 +18,19 @@ import (
 
 func main() {
 	cfg := config.Load("api-service")
-	logrus.WithField("service", cfg.ServiceName).Info("starting")
+	logger := logrus.StandardLogger()
+	logger.WithField("service", cfg.ServiceName).Info("starting")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	ch, err := db.New(ctx, &cfg)
 	if err != nil {
-		logrus.WithError(err).Fatal("clickhouse connect error")
+		logger.WithError(err).Fatal("clickhouse connect error")
 	}
 	defer func() {
 		if err := ch.Close(); err != nil {
-			logrus.WithError(err).Error("clickhouse close error")
+			logger.WithError(err).Error("clickhouse close error")
 		}
 	}()
 
@@ -37,12 +38,12 @@ func main() {
 	cacheClient := cache.New(cfg.RedisAddr, cfg.RedisDB)
 	defer func() {
 		if err := cacheClient.Close(); err != nil {
-			logrus.WithError(err).Error("cache close error")
+			logger.WithError(err).Error("cache close error")
 		}
 	}()
 
-	summaryService := service.NewMonthlySummaryService(repo, cacheClient, cfg.CacheTTL, cfg.HotTTL, cfg.LockTTL)
-	summaryController := controller.NewMonthlySummaryController(summaryService, logrus.StandardLogger())
+	summaryService := service.NewMonthlySummaryService(repo, cacheClient, logger, cfg.CacheTTL, cfg.HotTTL, cfg.LockTTL)
+	summaryController := controller.NewMonthlySummaryController(summaryService, logger)
 
 	app := fiber.New()
 	app.Get("/v1/customers/:customerId/monthly-order-summary", summaryController.GetMonthlySummary)
@@ -52,8 +53,8 @@ func main() {
 		_ = app.Shutdown()
 	}()
 
-	logrus.WithField("addr", cfg.HTTPAddr).Info("api listening")
+	logger.WithField("addr", cfg.HTTPAddr).Info("api listening")
 	if err := app.Listen(cfg.HTTPAddr); err != nil {
-		logrus.WithError(err).Fatal("http server error")
+		logger.WithError(err).Fatal("http server error")
 	}
 }

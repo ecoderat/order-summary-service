@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/google/uuid"
+	"github.com/sirupsen/logrus"
 )
 
 const currencyDefault = "TRY"
@@ -33,6 +33,7 @@ type ProducerConfig struct {
 type producerService struct {
 	producer *kafka.Producer
 	cfg      ProducerConfig
+	logger   *logrus.Logger
 
 	customerTopic string
 	orderTopic    string
@@ -73,7 +74,10 @@ type orderEventStore struct {
 	byCustomer map[string]orderEvent
 }
 
-func NewProducerService(producer *kafka.Producer, customerTopic, orderTopic string, cfg ProducerConfig) (ProducerService, error) {
+func NewProducerService(producer *kafka.Producer, customerTopic, orderTopic string, logger *logrus.Logger, cfg ProducerConfig) (ProducerService, error) {
+	if logger == nil {
+		logger = logrus.StandardLogger()
+	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = 3 * time.Second
 	}
@@ -96,6 +100,7 @@ func NewProducerService(producer *kafka.Producer, customerTopic, orderTopic stri
 	return &producerService{
 		producer:      producer,
 		cfg:           cfg,
+		logger:        logger,
 		customerTopic: customerTopic,
 		orderTopic:    orderTopic,
 		pool:          &customerPool{max: cfg.CustomerPoolSize},
@@ -106,11 +111,17 @@ func NewProducerService(producer *kafka.Producer, customerTopic, orderTopic stri
 }
 
 func (s *producerService) Run(ctx context.Context) error {
-	log.Printf("interval=%s size=%d ratio=%.2f dup=%d%% customer_upgrade=%d%% order_upgrade=%d%% customer_pool=%d",
-		s.cfg.Interval, s.cfg.Size, s.cfg.CustomerRatio, s.cfg.DupPercent,
-		s.cfg.CustomerUpgradePercent, s.cfg.OrderUpgradePercent, s.cfg.CustomerPoolSize)
+	s.logger.WithFields(logrus.Fields{
+		"interval":         s.cfg.Interval.String(),
+		"size":             s.cfg.Size,
+		"ratio":            s.cfg.CustomerRatio,
+		"dup_percent":      s.cfg.DupPercent,
+		"customer_upgrade": s.cfg.CustomerUpgradePercent,
+		"order_upgrade":    s.cfg.OrderUpgradePercent,
+		"customer_pool":    s.cfg.CustomerPoolSize,
+	}).Info("producer config")
 	if s.cfg.FixedCustomerID != "" {
-		log.Printf("fixed customer_id=%s", s.cfg.FixedCustomerID)
+		s.logger.WithField("customer_id", s.cfg.FixedCustomerID).Info("fixed customer id")
 	}
 
 	ticker := time.NewTicker(s.cfg.Interval)
@@ -122,19 +133,22 @@ func (s *producerService) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			customerCount, orderCount := splitCounts(s.cfg.Size, s.cfg.CustomerRatio)
-			log.Printf("tick send customer=%d order=%d", customerCount, orderCount)
+			s.logger.WithFields(logrus.Fields{
+				"customer": customerCount,
+				"order":    orderCount,
+			}).Info("tick send")
 			for i := 0; i < customerCount; i++ {
 				customerID := s.pickCustomerID(rollPercent(s.rng, s.cfg.CustomerUpgradePercent))
 				customerEvt := s.buildCustomerEvent(customerID)
 				if err := s.sendEvent(s.customerTopic, customerEvt.CustomerID, customerEvt); err != nil {
-					log.Printf("customer send error: %v", err)
+					s.logger.WithError(err).Error("customer send error")
 				}
 			}
 			for i := 0; i < orderCount; i++ {
 				customerID := s.pickCustomerID(true)
 				orderEvt := s.buildOrderEvent(customerID)
 				if err := s.sendEvent(s.orderTopic, orderEvt.CustomerID, orderEvt); err != nil {
-					log.Printf("order send error: %v", err)
+					s.logger.WithError(err).Error("order send error")
 				}
 			}
 			s.producer.Flush(1000)
