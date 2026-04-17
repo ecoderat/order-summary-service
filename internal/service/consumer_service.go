@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"io"
 	"strings"
 	"time"
 
@@ -23,7 +24,7 @@ type consumerService struct {
 	consumer *kafka.Consumer
 	repo     repository.Repository
 	cache    cache.Cache
-	ch       Closer
+	ch       io.Closer
 	logger   *logrus.Logger
 
 	batchSize         int
@@ -79,7 +80,7 @@ func NewConsumerService(
 	consumer *kafka.Consumer,
 	repo repository.Repository,
 	cacheClient cache.Cache,
-	ch Closer,
+	ch io.Closer,
 	logger *logrus.Logger,
 	cfg ConsumerConfig,
 ) (ConsumerService, error) {
@@ -145,7 +146,6 @@ func (s *consumerService) Run(ctx context.Context) error {
 
 		switch e := event.(type) {
 		case *kafka.Message:
-			// log.Printf("message received topic=%s partition=%d offset=%d key=%s bytes=%d", *e.TopicPartition.Topic, e.TopicPartition.Partition, e.TopicPartition.Offset, string(e.Key), len(e.Value))
 			batchType, err := s.processMessage(ctx, e.Value)
 			if err != nil {
 				s.logger.WithError(err).Error("message processing error")
@@ -210,7 +210,6 @@ func (s *consumerService) processMessage(ctx context.Context, payload []byte) (b
 		return batchResult{kind: batchUnknown}, err
 	}
 
-	// log.Printf("event type=%s", eventType)
 	switch eventType {
 	case models.EventTypeCustomerCreated:
 		evt, err := models.ParseCustomerEvent(payload)
@@ -406,8 +405,3 @@ func filterTopics(topics []string) []string {
 }
 
 var ErrNoTopics = kafka.NewError(kafka.ErrUnknownTopicOrPart, "no topics configured", false)
-
-// Closer matches clickhouse.Conn.
-type Closer interface {
-	Close() error
-}

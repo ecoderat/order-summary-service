@@ -19,7 +19,6 @@ type Config struct {
 	ClickHouseDB          string
 	ClickHouseUser        string
 	ClickHousePassword    string
-	ClickHouseProtocol    string
 	ClickHouseTimeout     time.Duration
 	UseTLS                bool
 	DBMaxConnLifetime     time.Duration
@@ -49,7 +48,6 @@ func Load(serviceName string) Config {
 		ClickHouseDB:          envOrDefault("CLICKHOUSE_DB", "default"),
 		ClickHouseUser:        envOrDefault("CLICKHOUSE_USER", "default"),
 		ClickHousePassword:    envOrDefault("CLICKHOUSE_PASSWORD", "password"),
-		ClickHouseProtocol:    envOrDefault("CLICKHOUSE_PROTOCOL", "tcp"),
 		ClickHouseTimeout:     time.Duration(envIntOrDefault("CLICKHOUSE_TIMEOUT_SECONDS", 15)) * time.Second,
 		UseTLS:                envOrDefault("CLICKHOUSE_USE_TLS", "false") == "true",
 		DBMaxConnLifetime:     time.Duration(envIntOrDefault("DB_MAX_CONN_LIFETIME_MINUTES", 60)) * time.Minute,

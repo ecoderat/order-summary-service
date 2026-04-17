@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math/rand"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -18,12 +17,12 @@ const (
 	cacheBestEffortTimeout = 300 * time.Millisecond
 	jitterMin              = 50 * time.Millisecond
 	jitterMax              = 150 * time.Millisecond
+
+	// 5 retries × 50–150 ms jitter = up to ~750 ms worst-case wait before DB fallback.
+	defaultLockRetry = 5
 )
 
-var (
-	ErrCustomerNotFound = errors.New("customer not found")
-	seedOnce            sync.Once
-)
+var ErrCustomerNotFound = errors.New("customer not found")
 
 type MonthlySummaryService interface {
 	GetMonthlySummary(ctx context.Context, customerID string) (MonthlySummary, error)
@@ -68,7 +67,7 @@ func NewMonthlySummaryService(repo repository.Repository, cacheClient cache.Cach
 		cacheTTL:  cacheTTL,
 		hotTTL:    hotTTL,
 		lockTTL:   lockTTL,
-		lockRetry: 2,
+		lockRetry: defaultLockRetry,
 		logger:    logger,
 	}
 }

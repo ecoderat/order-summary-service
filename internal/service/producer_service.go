@@ -12,12 +12,12 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+
+	"order-summary-service/internal/models"
 )
 
 const (
 	currencyDefault        = "TRY"
-	customerCreatedEvent   = "CUSTOMER_CREATED"
-	orderCreatedEvent      = "ORDER_CREATED"
 	tickFlushTimeoutMs     = 1000
 	shutdownFlushTimeoutMs = 5000
 )
@@ -164,7 +164,7 @@ func (s *producerService) buildCustomerEvent(customerID string) customerEvent {
 	return s.custStore.put(customerEvent{
 		EventID:    uuid.NewString(),
 		EventTime:  time.Now().UTC().Format(time.RFC3339Nano),
-		EventType:  customerCreatedEvent,
+		EventType:  models.EventTypeCustomerCreated,
 		CustomerID: customerID,
 	})
 }
@@ -186,7 +186,7 @@ func (s *producerService) buildOrderEvent(customerID string) orderEvent {
 	return s.orderStore.put(orderEvent{
 		EventID:     uuid.NewString(),
 		EventTime:   time.Now().UTC().Format(time.RFC3339Nano),
-		EventType:   orderCreatedEvent,
+		EventType:   models.EventTypeOrderCreated,
 		OrderID:     orderID,
 		CustomerID:  customerID,
 		TotalAmount: randomAmount(s.rng),
@@ -264,7 +264,6 @@ func (s *producerService) flushBestEffort(timeoutMs int) {
 	if s.producer == nil {
 		return
 	}
-	// TODO: make flush strategy configurable if needed.
 	s.producer.Flush(timeoutMs)
 }
 
