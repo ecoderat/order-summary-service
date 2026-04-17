@@ -57,9 +57,9 @@ func (suite *MonthlySummaryServiceTestSuite) TestGetMonthlySummary_Success() {
 	// Mock cache operations
 	suite.mockCache.On("MarkMonthlyHot", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
 	suite.mockCache.On("CacheGet", mock.Anything, customerID, dateKey).Return("", false, nil)
-	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return(true, nil)
+	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return("test-token", true, nil)
 	suite.mockCache.On("CacheSet", mock.Anything, customerID, dateKey, mock.Anything, mock.Anything).Return(nil)
-	suite.mockCache.On("ReleaseMonthlyLock", mock.Anything, customerID, dateKey).Return(nil)
+	suite.mockCache.On("ReleaseMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
 
 	// Mock repository operations
 	suite.mockRepo.On("CustomerExistsFinal", ctx, customerID).Return(true, nil)
@@ -132,8 +132,8 @@ func (suite *MonthlySummaryServiceTestSuite) TestGetMonthlySummary_CustomerNotFo
 	// Mock cache operations
 	suite.mockCache.On("MarkMonthlyHot", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
 	suite.mockCache.On("CacheGet", mock.Anything, customerID, dateKey).Return("", false, nil)
-	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return(true, nil)
-	suite.mockCache.On("ReleaseMonthlyLock", mock.Anything, customerID, dateKey).Return(nil)
+	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return("test-token", true, nil)
+	suite.mockCache.On("ReleaseMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
 
 	// Mock: customer doesn't exist
 	suite.mockRepo.On("CustomerExistsFinal", ctx, customerID).Return(false, nil)
@@ -160,9 +160,9 @@ func (suite *MonthlySummaryServiceTestSuite) TestGetMonthlySummary_EmptySummaryW
 	// Mock cache operations
 	suite.mockCache.On("MarkMonthlyHot", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
 	suite.mockCache.On("CacheGet", mock.Anything, customerID, dateKey).Return("", false, nil)
-	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return(true, nil)
+	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return("test-token", true, nil)
 	suite.mockCache.On("CacheSet", mock.Anything, customerID, dateKey, mock.Anything, mock.Anything).Return(nil)
-	suite.mockCache.On("ReleaseMonthlyLock", mock.Anything, customerID, dateKey).Return(nil)
+	suite.mockCache.On("ReleaseMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
 
 	// Mock: customer exists
 	suite.mockRepo.On("CustomerExistsFinal", ctx, customerID).Return(true, nil)
@@ -209,8 +209,8 @@ func (suite *MonthlySummaryServiceTestSuite) TestGetMonthlySummary_LockNotAcquir
 	suite.mockCache.On("MarkMonthlyHot", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
 	// First cache get: miss
 	suite.mockCache.On("CacheGet", mock.Anything, customerID, dateKey).Return("", false, nil).Once()
-	// Lock acquisition fails
-	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return(false, nil)
+	// Lock acquisition fails — another goroutine holds it
+	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return("", false, nil)
 	// Retry cache get: hit
 	suite.mockCache.On("CacheGet", mock.Anything, customerID, dateKey).Return(payload, true, nil).Once()
 
@@ -226,6 +226,61 @@ func (suite *MonthlySummaryServiceTestSuite) TestGetMonthlySummary_LockNotAcquir
 	suite.Equal(2500.75, result.TotalSpend)
 	suite.Equal("EUR", result.Currency)
 	suite.Equal("cache", result.Source)
+}
+
+func (suite *MonthlySummaryServiceTestSuite) TestGetMonthlySummary_LockNotAcquired_AllRetriesMiss_FallsThroughToDB() {
+	// Given: cache miss, lock held by another goroutine, all retries miss,
+	// so this goroutine falls through and queries the DB directly.
+	// Crucially: it must NOT write the result to cache (it is not the lock holder).
+	ctx := context.Background()
+	customerID := "C111"
+
+	now := time.Now().UTC()
+	windowTo := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	windowFrom := windowTo.AddDate(0, 0, -30)
+	dateKey := cache.MonthlyDateString(windowTo)
+
+	expectedSummary := repository.MonthlySummary{
+		CustomerID: customerID,
+		WindowFrom: windowFrom,
+		WindowTo:   windowTo,
+		OrderCount: 3,
+		TotalSpend: decimal.NewFromFloat(750.00),
+		Currency:   "TRY",
+	}
+
+	suite.mockCache.On("MarkMonthlyHot", mock.Anything, customerID, dateKey, mock.Anything).Return(nil)
+	// Initial cache check: miss.
+	suite.mockCache.On("CacheGet", mock.Anything, customerID, dateKey).Return("", false, nil).Once()
+	// Lock not acquired — another goroutine holds it.
+	suite.mockCache.On("AcquireMonthlyLock", mock.Anything, customerID, dateKey, mock.Anything).Return("", false, nil)
+	// All retries inside waitForCacheOrGiveUp also miss.
+	suite.mockCache.On("CacheGet", mock.Anything, customerID, dateKey).Return("", false, nil).Times(defaultLockRetry)
+
+	// Fallthrough to DB.
+	suite.mockRepo.On("CustomerExistsFinal", ctx, customerID).Return(true, nil).Once()
+	suite.mockRepo.On("MonthlySummaryFinal", ctx, customerID, windowFrom, windowTo).
+		Return(expectedSummary, nil).Once()
+
+	// When
+	result, err := suite.service.GetMonthlySummary(ctx, customerID)
+
+	// Then: DB result is returned correctly.
+	suite.NoError(err)
+	suite.Equal(customerID, result.CustomerID)
+	suite.Equal(windowFrom, result.WindowFrom)
+	suite.Equal(windowTo, result.WindowTo)
+	suite.Equal(uint64(3), result.OrderCount)
+	suite.Equal(750.00, result.TotalSpend)
+	suite.Equal("TRY", result.Currency)
+	suite.Equal("db", result.Source)
+	// Verify the full retry loop executed: 1 initial check + defaultLockRetry retries.
+	suite.mockCache.AssertNumberOfCalls(suite.T(), "CacheGet", 1+defaultLockRetry)
+	suite.mockRepo.AssertNumberOfCalls(suite.T(), "CustomerExistsFinal", 1)
+	suite.mockRepo.AssertNumberOfCalls(suite.T(), "MonthlySummaryFinal", 1)
+	// Loser must not write to cache or release a lock it does not hold.
+	suite.mockCache.AssertNotCalled(suite.T(), "CacheSet")
+	suite.mockCache.AssertNotCalled(suite.T(), "ReleaseMonthlyLock")
 }
 
 func TestMonthlySummaryServiceTestSuite(t *testing.T) {

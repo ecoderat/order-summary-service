@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -30,8 +31,8 @@ type Cache interface {
 	ClearPending(ctx context.Context, customerID, dateUTC string) error
 	EnqueueRefreshJob(ctx context.Context, job RefreshJob) error
 	DequeueRefreshJob(ctx context.Context, timeout time.Duration) (RefreshJob, bool, error)
-	AcquireMonthlyLock(ctx context.Context, customerID, dateUTC string, ttl time.Duration) (bool, error)
-	ReleaseMonthlyLock(ctx context.Context, customerID, dateUTC string) error
+	AcquireMonthlyLock(ctx context.Context, customerID, dateUTC string, ttl time.Duration) (token string, acquired bool, err error)
+	ReleaseMonthlyLock(ctx context.Context, customerID, dateUTC, token string) error
 	Close() error
 }
 
@@ -176,18 +177,35 @@ func (c *cache) DequeueRefreshJob(ctx context.Context, timeout time.Duration) (R
 	return job, true, nil
 }
 
-func (c *cache) AcquireMonthlyLock(ctx context.Context, customerID, dateUTC string, ttl time.Duration) (bool, error) {
+// releaseLockScript deletes the lock key only when the stored token matches the
+// caller's token. This prevents a goroutine whose lock TTL already expired
+// from releasing a lock that another goroutine has since acquired.
+var releaseLockScript = redis.NewScript(`
+	if redis.call("GET", KEYS[1]) == ARGV[1] then
+		return redis.call("DEL", KEYS[1])
+	end
+	return 0
+`)
+
+// AcquireMonthlyLock attempts to acquire the monthly summary lock for the given
+// customer and date. On success it returns the opaque token that must be passed
+// to ReleaseMonthlyLock; that token ensures only the holder can release the lock.
+func (c *cache) AcquireMonthlyLock(ctx context.Context, customerID, dateUTC string, ttl time.Duration) (token string, acquired bool, err error) {
+	token = uuid.NewString()
 	key := MonthlyLockKey(customerID, dateUTC)
-	set, err := c.rdb.SetNX(ctx, key, "1", ttl).Result()
-	if err != nil {
-		return false, err
+	acquired, err = c.rdb.SetNX(ctx, key, token, ttl).Result()
+	if err != nil || !acquired {
+		return "", acquired, err
 	}
-	return set, nil
+	return token, true, nil
 }
 
-func (c *cache) ReleaseMonthlyLock(ctx context.Context, customerID, dateUTC string) error {
+// ReleaseMonthlyLock releases the lock only when the stored token matches.
+// If the lock already expired and was re-acquired by another goroutine this is
+// a no-op, protecting the new holder from a spurious release.
+func (c *cache) ReleaseMonthlyLock(ctx context.Context, customerID, dateUTC, token string) error {
 	key := MonthlyLockKey(customerID, dateUTC)
-	return c.rdb.Del(ctx, key).Err()
+	return releaseLockScript.Run(ctx, c.rdb, []string{key}, token).Err()
 }
 
 func EncodeMonthlySummary(entry MonthlySummaryEntry) (string, error) {

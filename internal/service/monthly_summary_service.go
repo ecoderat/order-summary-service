@@ -86,13 +86,23 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 		return result, nil
 	}
 
-	cached, ok, release := s.acquireLockOrWaitForCache(ctx, customerID, dateKey, start, log)
-	if release != nil {
-		defer release()
+	// AcquireMonthlyLock returns (token, true, nil) when this goroutine is the
+	// winner and must perform the DB read. Returns ("", false, nil) when another
+	// goroutine already holds the lock. A non-nil error indicates a Redis failure.
+	token, winner, lockErr := s.cache.AcquireMonthlyLock(ctx, customerID, dateKey, s.lockTTL)
+	if lockErr != nil {
+		log.WithError(lockErr).Warn("lock acquire failed, proceeding without lock")
 	}
-
-	if ok {
-		return cached, nil
+	if winner {
+		defer s.releaseLockBestEffort(customerID, dateKey, token, log)
+	} else if lockErr == nil {
+		// Another goroutine holds the lock; poll for it to populate the cache.
+		if cached, ok, waitErr := s.waitForCacheOrGiveUp(ctx, customerID, dateKey, start, log); waitErr != nil {
+			return MonthlySummary{}, waitErr
+		} else if ok {
+			return cached, nil
+		}
+		// All retries missed — fall through to DB without holding the lock.
 	}
 
 	exists, err := s.repo.CustomerExistsFinal(ctx, customerID)
@@ -117,7 +127,9 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 			"window_to":   windowTo.Format("2006-01-02"),
 			"duration_ms": time.Since(start).Milliseconds(),
 		}).Info("monthly summary empty")
-		s.setCacheBestEffort(customerID, dateKey, result, log)
+		if winner {
+			s.setCacheBestEffort(customerID, dateKey, result, log)
+		}
 		return result, nil
 	}
 
@@ -129,7 +141,9 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 		"duration_ms": time.Since(start).Milliseconds(),
 	}).Info("monthly summary ready")
 
-	s.setCacheBestEffort(customerID, dateKey, result, log)
+	if winner {
+		s.setCacheBestEffort(customerID, dateKey, result, log)
+	}
 	return result, nil
 }
 
@@ -154,28 +168,19 @@ func (s *monthlySummaryService) tryCache(ctx context.Context, customerID, dateKe
 	return resultFromEntry(entry, "cache"), true
 }
 
-func (s *monthlySummaryService) acquireLockOrWaitForCache(ctx context.Context, customerID, dateKey string, start time.Time, log *logrus.Entry) (MonthlySummary, bool, func()) {
-	locked, err := s.cache.AcquireMonthlyLock(ctx, customerID, dateKey, s.lockTTL)
-	if err != nil {
-		log.WithError(err).Warn("lock acquire failed")
-		return MonthlySummary{}, false, nil
-	}
-
-	if locked {
-		return MonthlySummary{}, false, func() {
-			s.releaseLockBestEffort(customerID, dateKey, log)
-		}
-	}
-
+// waitForCacheOrGiveUp polls the cache with jittered backoff up to
+// defaultLockRetry times. Returns (summary, true, nil) on a cache hit.
+// Returns (zero, false, nil) if all retries miss — caller should fall back to
+// the DB. Returns a non-nil error only on context cancellation.
+func (s *monthlySummaryService) waitForCacheOrGiveUp(ctx context.Context, customerID, dateKey string, start time.Time, log *logrus.Entry) (MonthlySummary, bool, error) {
 	for i := 0; i < s.lockRetry; i++ {
 		if !jitterSleep(ctx) {
-			return MonthlySummary{}, false, nil
+			return MonthlySummary{}, false, ctx.Err()
 		}
 		if result, ok := s.tryCache(ctx, customerID, dateKey, start, log, "monthly summary cache hit after retry"); ok {
 			return result, true, nil
 		}
 	}
-
 	return MonthlySummary{}, false, nil
 }
 
@@ -209,11 +214,11 @@ func (s *monthlySummaryService) setCacheBestEffort(customerID, dateKey string, r
 	}
 }
 
-func (s *monthlySummaryService) releaseLockBestEffort(customerID, dateKey string, log *logrus.Entry) {
+func (s *monthlySummaryService) releaseLockBestEffort(customerID, dateKey, token string, log *logrus.Entry) {
 	ctx, cancel := context.WithTimeout(context.Background(), cacheBestEffortTimeout)
 	defer cancel()
 
-	if err := s.cache.ReleaseMonthlyLock(ctx, customerID, dateKey); err != nil {
+	if err := s.cache.ReleaseMonthlyLock(ctx, customerID, dateKey, token); err != nil {
 		log.WithError(err).Warn("lock release failed")
 	}
 }

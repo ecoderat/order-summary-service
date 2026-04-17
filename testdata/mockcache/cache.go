@@ -81,12 +81,12 @@ func (m *Cache) DequeueRefreshJob(ctx context.Context, timeout time.Duration) (c
 	return cache.RefreshJob{}, args.Bool(1), args.Error(2)
 }
 
-func (m *Cache) AcquireMonthlyLock(ctx context.Context, customerID, dateUTC string, ttl time.Duration) (bool, error) {
+func (m *Cache) AcquireMonthlyLock(ctx context.Context, customerID, dateUTC string, ttl time.Duration) (string, bool, error) {
 	args := m.Called(ctx, customerID, dateUTC, ttl)
-	return args.Bool(0), args.Error(1)
+	return args.String(0), args.Bool(1), args.Error(2)
 }
 
-func (m *Cache) ReleaseMonthlyLock(ctx context.Context, customerID, dateUTC string) error {
-	args := m.Called(ctx, customerID, dateUTC)
+func (m *Cache) ReleaseMonthlyLock(ctx context.Context, customerID, dateUTC, token string) error {
+	args := m.Called(ctx, customerID, dateUTC, token)
 	return args.Error(0)
 }
