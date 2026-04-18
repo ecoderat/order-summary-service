@@ -1,5 +1,11 @@
 # order-summary-service
 
+![CI](https://github.com/ecoderat/order-summary-service/actions/workflows/ci.yml/badge.svg)
+![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)
+![ClickHouse](https://img.shields.io/badge/ClickHouse-FFCC01?logo=clickhouse&logoColor=black)
+![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-000000?logo=apachekafka&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)
+
 A low-latency order-summary API backed by Kafka event ingestion, ClickHouse current-state tables, and a Redis read-through cache with stampede protection.
 
 The service exposes a single REST endpoint that returns a rolling 30-day order summary for a customer, with UTC start-of-day window boundaries. It implements:
