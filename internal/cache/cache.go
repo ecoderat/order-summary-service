@@ -54,7 +54,7 @@ type MonthlySummaryEntry struct {
 	Currency   string    `json:"currency"`
 }
 
-func New(addr string, db int) *cache {
+func New(addr string, db int) Cache {
 	return &cache{
 		rdb: redis.NewClient(&redis.Options{
 			Addr: addr,

@@ -9,7 +9,6 @@ import (
 
 	"order-summary-service/internal/cache"
 	"order-summary-service/internal/config"
-	"order-summary-service/internal/date"
 	"order-summary-service/internal/db"
 	"order-summary-service/internal/repository"
 
@@ -90,7 +89,7 @@ func main() {
 			continue
 		}
 
-		windowTo := date.ToStartOfDay(asOfDate)
+		windowTo := time.Date(asOfDate.Year(), asOfDate.Month(), asOfDate.Day(), 0, 0, 0, 0, time.UTC)
 		windowFrom := windowTo.AddDate(0, 0, -30)
 
 		summary, err := repo.MonthlySummaryFinal(ctx, job.CustomerID, windowFrom, windowTo)

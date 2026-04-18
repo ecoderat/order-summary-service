@@ -10,7 +10,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"order-summary-service/internal/cache"
-	"order-summary-service/internal/date"
 	"order-summary-service/internal/models"
 	"order-summary-service/internal/repository"
 )
@@ -358,7 +357,8 @@ func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOr
 	if s.cache == nil {
 		return
 	}
-	cacheDate := date.ToStartOfDay(time.Now().UTC()).Format("2006-01-02")
+	now := time.Now().UTC()
+	cacheDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 	seen := make(map[string]struct{}, len(params))
 	for _, item := range params {
 		seen[item.CustomerID] = struct{}{}
@@ -370,7 +370,9 @@ func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOr
 		}
 		cancel()
 
-		hot, err := s.cache.IsMonthlyHot(context.Background(), customerID, cacheDate)
+		hotCtx, hotCancel := context.WithTimeout(context.Background(), s.redisTimeout)
+		hot, err := s.cache.IsMonthlyHot(hotCtx, customerID, cacheDate)
+		hotCancel()
 		if err != nil {
 			s.logger.WithError(err).WithField("customer_id", customerID).Warn("hot check failed")
 			continue
@@ -378,16 +380,20 @@ func (s *consumerService) invalidateOrderBatchCache(params []repository.CreateOr
 		if !hot {
 			continue
 		}
-		pending, err := s.cache.TrySetPending(context.Background(), customerID, cacheDate, s.pendingTTL)
+		pendingCtx, pendingCancel := context.WithTimeout(context.Background(), s.redisTimeout)
+		pending, err := s.cache.TrySetPending(pendingCtx, customerID, cacheDate, s.pendingTTL)
+		pendingCancel()
 		if err != nil {
 			s.logger.WithError(err).WithField("customer_id", customerID).Warn("pending set failed")
 			continue
 		}
 		if pending {
 			job := cache.RefreshJob{CustomerID: customerID, AsOfDate: cacheDate}
-			if err := s.cache.EnqueueRefreshJob(context.Background(), job); err != nil {
+			enqCtx, enqCancel := context.WithTimeout(context.Background(), s.redisTimeout)
+			if err := s.cache.EnqueueRefreshJob(enqCtx, job); err != nil {
 				s.logger.WithError(err).WithField("customer_id", customerID).Warn("refresh enqueue failed")
 			}
+			enqCancel()
 		}
 	}
 }

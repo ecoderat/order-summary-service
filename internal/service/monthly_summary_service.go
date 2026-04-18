@@ -9,7 +9,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"order-summary-service/internal/cache"
-	"order-summary-service/internal/date"
 	"order-summary-service/internal/repository"
 )
 
@@ -77,7 +76,7 @@ func (s *monthlySummaryService) GetMonthlySummary(ctx context.Context, customerI
 	log := s.logger.WithField("customer_id", customerID)
 
 	nowUTC := time.Now().UTC()
-	windowTo := date.ToStartOfDay(nowUTC)
+	windowTo := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC)
 	windowFrom := windowTo.AddDate(0, 0, -30)
 	dateKey := cache.MonthlyDateString(windowTo)
 

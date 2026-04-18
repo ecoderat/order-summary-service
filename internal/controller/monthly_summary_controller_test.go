@@ -19,7 +19,7 @@ type MonthlySummaryControllerTestSuite struct {
 	suite.Suite
 
 	mockService *mockservice.MonthlySummaryService
-	controller  MonthlySummaryController
+	controller  *MonthlySummaryController
 	app         *fiber.App
 }
 

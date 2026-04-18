@@ -7,15 +7,10 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/sirupsen/logrus"
 
-	"order-summary-service/internal/date"
 	"order-summary-service/internal/service"
 )
 
-type MonthlySummaryController interface {
-	GetMonthlySummary(c fiber.Ctx) error
-}
-
-type monthlySummaryController struct {
+type MonthlySummaryController struct {
 	svc    service.MonthlySummaryService
 	logger *logrus.Logger
 }
@@ -30,14 +25,14 @@ type monthlySummaryResponse struct {
 	Source     string  `json:"source"`
 }
 
-func NewMonthlySummaryController(svc service.MonthlySummaryService, logger *logrus.Logger) MonthlySummaryController {
+func NewMonthlySummaryController(svc service.MonthlySummaryService, logger *logrus.Logger) *MonthlySummaryController {
 	if logger == nil {
 		logger = logrus.StandardLogger()
 	}
-	return &monthlySummaryController{svc: svc, logger: logger}
+	return &MonthlySummaryController{svc: svc, logger: logger}
 }
 
-func (c *monthlySummaryController) GetMonthlySummary(ctx fiber.Ctx) error {
+func (c *MonthlySummaryController) GetMonthlySummary(ctx fiber.Ctx) error {
 	start := time.Now()
 	customerID := ctx.Params("customerId")
 	logger := c.logger.WithFields(logrus.Fields{
@@ -64,8 +59,8 @@ func (c *monthlySummaryController) GetMonthlySummary(ctx fiber.Ctx) error {
 
 	resp := monthlySummaryResponse{
 		CustomerID: summary.CustomerID,
-		WindowFrom: date.FormatYYYYMMDD(summary.WindowFrom),
-		WindowTo:   date.FormatYYYYMMDD(summary.WindowTo),
+		WindowFrom: summary.WindowFrom.UTC().Format("2006-01-02"),
+		WindowTo:   summary.WindowTo.UTC().Format("2006-01-02"),
 		OrderCount: summary.OrderCount,
 		TotalSpend: summary.TotalSpend,
 		Currency:   summary.Currency,

@@ -40,8 +40,8 @@ func New(ctx context.Context, cfg *config.Config) (clickhouse.Conn, error) {
 		return nil, fmt.Errorf("open clickhouse: %w", err)
 	}
 
-	if err := conn.Ping(context.Background()); err != nil {
-		return nil, err
+	if err := conn.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("clickhouse ping: %w", err)
 	}
 
 	return conn, nil

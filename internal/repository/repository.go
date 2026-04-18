@@ -148,6 +148,13 @@ func (r *repository) CustomerExistsFinal(ctx context.Context, customerID string)
 // MonthlySummaryFinal retrieves the monthly summary for a customer using FINAL modifier.
 func (r *repository) MonthlySummaryFinal(ctx context.Context, customerID string, windowFrom, windowTo time.Time) (MonthlySummary, error) {
 	windowToExclusive := windowTo.AddDate(0, 0, 1)
+	// NOTE: This aggregation assumes one currency per customer. If a customer
+	// has orders in multiple currencies, `any(currency)` returns an arbitrary
+	// value while `sum(total_amount)` sums across all currencies, which is
+	// incorrect. The invariant is expected to be enforced at order ingestion
+	// time (single currency per customer_id). If multi-currency support is
+	// needed, this query must group by currency and the response shape must
+	// change accordingly.
 	query := `
 	SELECT
 		customer_id,
