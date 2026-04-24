@@ -94,7 +94,7 @@ A naive `DEL` on a Redis lock is unsafe: if the lock's TTL fires while the winne
 
 ### 6. LockTTL > ClickHouseTimeout by design
 
-The lock must outlive the winner's database query. `LOCK_TTL_SECONDS` defaults to 20s; `CLICKHOUSE_TIMEOUT_SECONDS` defaults to 15s. A lock that expires before the query finishes lets losers stampede ClickHouse — exactly what the lock exists to prevent.
+The lock must outlive the winner's database query. `LOCK_TTL_SECONDS` defaults to 5s; `CLICKHOUSE_TIMEOUT_SECONDS` defaults to 3s. A lock that expires before the query finishes lets losers stampede ClickHouse — exactly what the lock exists to prevent.
 
 ### 7. Jittered retry with DB fallback for losers
 
@@ -214,7 +214,7 @@ Cache entries are stored under the key `cache:monthly:{customer_id}:{date}`, whe
 
 On every API request, the service marks the customer's date key as "hot" (`hot:monthly:{customer_id}:{date}`, TTL 2 hours). When the consumer writes a batch of orders, it checks the hot flag; for hot customers, it sets a pending flag (`SetNX`, TTL 30s) and enqueues a refresh job. The pending flag deduplicates signals so a burst of writes produces one refresh, not many.
 
-On a cache miss, the API acquires a per-customer-date Redis lock (UUID token, TTL 20s). The lock winner queries ClickHouse and writes the result to cache. Losers poll with jittered backoff (50–150 ms, up to 5 retries). Losers that exhaust retries fall through to ClickHouse directly but do not write the result to cache. Lock release is performed via a Lua script that only deletes the key if the stored token matches, preventing a stale holder from freeing a lock it no longer owns.
+On a cache miss, the API acquires a per-customer-date Redis lock (UUID token, TTL 5s). The lock winner queries ClickHouse and writes the result to cache. Losers poll with jittered backoff (50–150 ms, up to 5 retries). Losers that exhaust retries fall through to ClickHouse directly but do not write the result to cache. Lock release is performed via a Lua script that only deletes the key if the stored token matches, preventing a stale holder from freeing a lock it no longer owns.
 
 ### Consumer: Idempotency and Out-of-Order Events
 
@@ -255,7 +255,7 @@ All configuration is read from environment variables at startup. There are no re
 | `CLICKHOUSE_DB` | `default` | Database name |
 | `CLICKHOUSE_USER` | `default` | Username |
 | `CLICKHOUSE_PASSWORD` | `password` | Password |
-| `CLICKHOUSE_TIMEOUT_SECONDS` | `15` | Query timeout |
+| `CLICKHOUSE_TIMEOUT_SECONDS` | `3` | Query timeout |
 | `CLICKHOUSE_USE_TLS` | `false` | Enable TLS |
 | `DB_MAX_CONNS` | `10` | Maximum open connections |
 | `DB_MIN_CONNS` | `5` | Minimum idle connections |
@@ -275,7 +275,7 @@ All configuration is read from environment variables at startup. There are no re
 | `CACHE_TTL_HOURS` | `28` | Monthly summary cache TTL |
 | `HOT_TTL_HOURS` | `2` | Hot-key marker TTL |
 | `PENDING_TTL_SECONDS` | `30` | Refresh-pending dedup marker TTL |
-| `LOCK_TTL_SECONDS` | `20` | Cache-miss distributed lock TTL — must exceed `CLICKHOUSE_TIMEOUT_SECONDS` |
+| `LOCK_TTL_SECONDS` | `5` | Cache-miss distributed lock TTL — must exceed `CLICKHOUSE_TIMEOUT_SECONDS` |
 | `IDEMPOTENCY_TTL_HOURS` | `1440` | Event idempotency marker TTL (60 days) |
 
 ### HTTP

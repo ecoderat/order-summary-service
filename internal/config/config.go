@@ -48,7 +48,7 @@ func Load(serviceName string) Config {
 		ClickHouseDB:          envOrDefault("CLICKHOUSE_DB", "default"),
 		ClickHouseUser:        envOrDefault("CLICKHOUSE_USER", "default"),
 		ClickHousePassword:    envOrDefault("CLICKHOUSE_PASSWORD", "password"),
-		ClickHouseTimeout:     time.Duration(envIntOrDefault("CLICKHOUSE_TIMEOUT_SECONDS", 15)) * time.Second,
+		ClickHouseTimeout:     time.Duration(envIntOrDefault("CLICKHOUSE_TIMEOUT_SECONDS", 3)) * time.Second,
 		UseTLS:                envOrDefault("CLICKHOUSE_USE_TLS", "false") == "true",
 		DBMaxConnLifetime:     time.Duration(envIntOrDefault("DB_MAX_CONN_LIFETIME_MINUTES", 60)) * time.Minute,
 		DBMaxConns:            envIntOrDefault("DB_MAX_CONNS", 10),
@@ -61,9 +61,9 @@ func Load(serviceName string) Config {
 		// LockTTL must exceed the expected p99 ClickHouseTimeout, otherwise the
 		// winner's lock expires before it can populate the cache, allowing losers
 		// that retry after the TTL to stampede the database.
-		LockTTL: time.Duration(envIntOrDefault("LOCK_TTL_SECONDS", 20)) * time.Second,
-		HTTPAddr:              envOrDefault("HTTP_ADDR", ":8080"),
-		IdempotencyTTL:        time.Duration(envIntOrDefault("IDEMPOTENCY_TTL_HOURS", 60*24)) * time.Hour,
+		LockTTL:        time.Duration(envIntOrDefault("LOCK_TTL_SECONDS", 5)) * time.Second,
+		HTTPAddr:       envOrDefault("HTTP_ADDR", ":8080"),
+		IdempotencyTTL: time.Duration(envIntOrDefault("IDEMPOTENCY_TTL_HOURS", 60*24)) * time.Hour,
 	}
 }
 
